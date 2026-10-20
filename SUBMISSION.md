@@ -1,7 +1,7 @@
 # NammaMart Quick Commerce: ETL & ELT Pipeline Submission
 
 **Learner:** Harsh Pratap Singh
-**Module:** FDAIE Module 2, Data Engineering Foundations
+**Module:** FDE Module 2, Data Engineering Foundations
 
 ---
 

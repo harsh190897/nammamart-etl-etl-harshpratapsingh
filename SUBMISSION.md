@@ -18,11 +18,11 @@ Status of every item in section 6 of the assignment brief. ✅ done · 🟡 in p
 | 3 | Helper code in `include/` (quality checks, masking functions) | 🟡 ETL helpers complete (quality rules, masking, transform, load, reconciliation, reports, audit tables); ELT helpers in Part B | [include/nammamart_common.py](include/nammamart_common.py), [include/nammamart_etl_checks.py](include/nammamart_etl_checks.py), [include/nammamart_etl_transform.py](include/nammamart_etl_transform.py), [include/nammamart_etl_load.py](include/nammamart_etl_load.py) |
 | 4 | SQL files in `include/sql/` | ⬜ | Part B |
 | 5 | `SUBMISSION.md`: Data Issues Log (Part 0) | ✅ | [Part 0](#part-0-discovery-and-data-profiling) |
-| 6 | `SUBMISSION.md`: answers to Part C | ✅ Answered; screenshot pending | [Part C](#part-c-scheduling) |
+| 6 | `SUBMISSION.md`: answers to Part C | ✅ Answered, with schedule screenshot | [Part C](#part-c-scheduling) |
 | 7 | `SUBMISSION.md`: governance answers (Part E) | ⬜ | [Part E](#part-e-data-governance) |
 | 8 | `SUBMISSION.md`: observability results table (Part F) | ⬜ | [Part F](#part-f-observability-tests) |
 | 9 | `SUBMISSION.md`: recommendation (Part G) | ⬜ | [Part G](#part-g-recommendation-to-the-cto) |
-| 10 | Screenshots: both DAGs green in Graph view, 9:00 AM IST schedule, one quarantine file, `dq_results`, `pipeline_runs`, payment reconciliation | 🟡 1 of 7 (ETL graph) | [Screenshots](#screenshots) |
+| 10 | Screenshots: both DAGs green in Graph view, 9:00 AM IST schedule, one quarantine file, `dq_results`, `pipeline_runs`, payment reconciliation | 🟡 6 of 7 (ELT graph pending, Part B) | [Screenshots](#screenshots) |
 | 11 | Six business questions, SQL + result, from both pipelines | ⬜ | [Business questions](#business-questions) |
 | 12 | No API keys, passwords, webhook URLs or unmasked customer data outside `include/data/` | ✅ Checked on every commit | [.gitignore](.gitignore) |
 
@@ -196,6 +196,10 @@ Green run in the Airflow UI (Graph view, all 16 tasks `success`):
 
 **Quarantine (A.2).** `quarantine_and_log_dq` writes the failed rows of each file, exactly as received plus `source_file`, `source_row` and `failure_reason`, to `include/quarantine/harshpratapsingh/<file>_failed_<run_id>.csv`, and writes every check to `dq_results`. It is the only task in this step that writes to the warehouse, so DuckDB never has two writers.
 
+Example quarantine file (`orders_failed_<run_id>.csv`; the last column is `failure_reason`):
+
+![Quarantine file for orders.csv with the failure_reason column](docs/screenshots/04_quarantine_file.png)
+
 Result of a run on 2026-10-20:
 
 | File | Rows | Passed | Quarantined | Main reasons |
@@ -254,6 +258,8 @@ Of the 10 corrections in the increment file, 9 were applied; the tenth points to
 
 Of the 164 orders without a payment, 28 are September orders (the same 28 found in profiling) and 136 are new orders from 1 October: the payments export ends at 2026-09-30 23:47, so their payments have not arrived yet. The 9 `RETURNED_NOT_REFUNDED` rows are exactly the 9 DELIVERED → RETURNED corrections applied from the increment file. Their payments are still `SUCCESS`, so finance should check whether the refunds were issued.
 
+![Query result: etl_payment_reconciliation, mismatches by reason and example rows](docs/screenshots/07_payment_reconciliation.png)
+
 **Report (A.4).** `report` rebuilds two reporting tables and prints them in the task log:
 
 - `etl_daily_zone_revenue`: net revenue and delivered orders per day, zone and store (459 rows).
@@ -275,7 +281,11 @@ _To be completed._
 
 ## Part C: Scheduling
 
-**Status:** ✅ answered for the ETL DAG; the ELT DAG will use the same settings. Screenshot pending.
+**Status:** ✅ answered for the ETL DAG; the ELT DAG will use the same settings.
+
+DAG page in the Airflow UI (display timezone +05:30): schedule `0 9 * * 1-6`, next run `2026-10-21 09:00:00` IST.
+
+![ETL DAG schedule: 0 9 * * 1-6, next run 2026-10-21 09:00 IST](docs/screenshots/03_schedule_9am_ist.png)
 
 | Setting | Value | Why |
 |---|---|---|
@@ -321,6 +331,10 @@ The scheduler is not running, so nothing runs at 09:00 and the numbers are not r
 | Timeliness | No future `order_ts`, `payment_ts` or `signup_date` (compared with Bengaluru time) | Freshness: newest order older than 24 hours |
 
 Result of a run on 2026-10-20: **110 checks**, all 6 dimensions, **29 FAIL, 14 WARN, 67 PASS**. The failure counts match the [Data Issues Log](#05-data-issues-log) exactly (verified by [`tests/test_nammamart_etl.py`](tests/test_nammamart_etl.py)).
+
+Query result: the `dq_results` scorecard per run, and the checks that did not pass in the latest run:
+
+![Query result: dq_results scorecard per run and failing checks](docs/screenshots/05_dq_results.png)
 
 **ELT checks (SQL):** _to be completed in Part B._
 
@@ -401,6 +415,8 @@ ETL examples from testing on 2026-10-20:
 
 `rows_loaded` counts the rows written to the star schema (dimensions, payments and the batch of fact orders). `rows_extracted` = `rows_loaded` + `rows_quarantined` + 9, because 9 rows of the increment file replace an older version of the same order.
 
+![Query result: pipeline_runs](docs/screenshots/06_pipeline_runs.png)
+
 _ELT rows to be added in Part B._
 
 ### Experiments
@@ -460,10 +476,13 @@ Stored in [`docs/screenshots/`](docs/screenshots/).
 |---|---|---|---|
 | 1 | ETL DAG in Graph view, green run | [`docs/screenshots/01_etl_graph_green.png`](docs/screenshots/01_etl_graph_green.png) | ✅ |
 | 2 | ELT DAG in Graph view, green run | `docs/screenshots/02_elt_graph_green.png` | ⬜ |
-| 3 | Schedule showing 9:00 AM IST and the next run | `docs/screenshots/03_schedule_9am_ist.png` | ⬜ |
-| 4 | One quarantine file | `docs/screenshots/04_quarantine_file.png` | ⬜ |
-| 5 | Query result: `dq_results` | `docs/screenshots/05_dq_results.png` | ⬜ |
-| 6 | Query result: `pipeline_runs` | `docs/screenshots/06_pipeline_runs.png` | ⬜ |
-| 7 | Query result: payment reconciliation table | `docs/screenshots/07_payment_reconciliation.png` | ⬜ |
+| 3 | Schedule showing 9:00 AM IST and the next run | [`docs/screenshots/03_schedule_9am_ist.png`](docs/screenshots/03_schedule_9am_ist.png) | ✅ |
+| 4 | One quarantine file | [`docs/screenshots/04_quarantine_file.png`](docs/screenshots/04_quarantine_file.png) | ✅ |
+| 5 | Query result: `dq_results` | [`docs/screenshots/05_dq_results.png`](docs/screenshots/05_dq_results.png) | ✅ |
+| 6 | Query result: `pipeline_runs` | [`docs/screenshots/06_pipeline_runs.png`](docs/screenshots/06_pipeline_runs.png) | ✅ |
+| 7 | Query result: payment reconciliation table | [`docs/screenshots/07_payment_reconciliation.png`](docs/screenshots/07_payment_reconciliation.png) | ✅ |
 
-Screenshots of tables must not show unmasked customer data.
+Screenshots of tables must not show unmasked customer data. All screenshots above were checked: none shows a name, email or phone number (the quarantine screenshot uses the orders file, which only contains customer IDs).
+
+- **#3** shows the DAG header: schedule `0 9 * * 1-6` and next run `2026-10-21 09:00:00`. The Airflow UI is set to the +05:30 (IST) display timezone, so the next run is shown in IST. Airflow stores it as 03:30 UTC (see [Part C](#part-c-scheduling)).
+- **#5** and **#6** currently show ETL runs only; they will be retaken after Part B so that they include the ELT DAG's rows as well.

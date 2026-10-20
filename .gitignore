@@ -1,0 +1,23 @@
+.git
+.env
+.DS_Store
+airflow_settings.yaml
+__pycache__/
+astro
+.venv
+.astro/standalone/
+airflow-webserver.pid
+webserver_config.py
+airflow.cfg
+airflow.db
+.astro/*.local.yml
+.astro/*.local.yaml
+test_api.py 
+
+# NammaMart assignment: never commit generated data that can contain personal data
+include/warehouse*.duckdb
+include/warehouse*.duckdb.wal
+include/tmp/
+include/quarantine/*
+!include/quarantine/.gitkeep
+profiling/profile_output.txt

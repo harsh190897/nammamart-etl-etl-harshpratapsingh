@@ -187,3 +187,15 @@ def test_parquet_round_trip_keeps_types(tmp_path):
     assert back["flag"].iloc[0] == True and pd.isna(back["flag"].iloc[1])  # noqa: E712
     assert back["ts"].iloc[0] == pd.Timestamp("2026-09-01 10:00:00") and pd.isna(back["ts"].iloc[1])
 
+
+
+# ── Run folder clean-up (Part A.4) ────────────────────────────────────
+def test_cleanup_removes_only_old_run_folders(tmp_path, monkeypatch):
+    import os
+    import time
+    monkeypatch.setattr(nc, "TMP_DIR", tmp_path / "tmp")
+    old, new = nc.run_dir("old_run"), nc.run_dir("new_run")
+    five_days_ago = time.time() - 5 * 86400
+    os.utime(old, (five_days_ago, five_days_ago))
+    assert nc.cleanup_old_run_dirs(keep_days=3) == 1
+    assert not old.exists() and new.exists()

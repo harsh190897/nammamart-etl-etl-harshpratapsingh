@@ -4,20 +4,21 @@ dags/nammamart_etl_harshpratapsingh.py
 NammaMart ETL pipeline (Part A): Extract -> Validate -> Transform -> Load.
 Only rows that pass every Critical check reach the finance tables; failed rows are quarantined with a reason.
 
-Graph so far (A.1 - A.3):
+Graph:
   extract_customers -> validate_customers --+
   extract_products  -> validate_products  --+--> validate_orders --+--> quarantine_and_log_dq --+
   extract_stores    -> validate_stores    --+          ^           |                            +--> load
   extract_orders    -----------------------------------+           +--> transform --------------+
   extract_payments  -> validate_payments (also uses extract_orders) -+
+  load -> reconcile -> report -> audit_run (runs even if something failed)
 
-`load` publishes the warehouse tables as Airflow Assets (see the Assets page in the UI).
+`load`, `reconcile` and `report` publish their warehouse tables as Airflow Assets (see the Assets page).
 
 Helper code lives in include/:
   nammamart_common.py           paths, constants, DuckDB connection, masking, audit tables
   nammamart_etl_checks.py       data quality rules (pandas)
   nammamart_etl_transform.py    standardise, mask, join, derive (pandas)
-  nammamart_etl_load.py         star schema load (DuckDB SQL)
+  nammamart_etl_load.py         star schema load, reconciliation, reports (DuckDB SQL)
 """
 import sys
 from datetime import timedelta
@@ -34,10 +35,15 @@ DAG_ID = "nammamart_etl_harshpratapsingh"
 # Warehouse tables written by the `load` task. Declaring them as Assets makes Airflow record an
 # asset event every time `load` succeeds, and shows the tables and their producer on the Assets page.
 STAR_SCHEMA_TABLES = ["etl_dim_customer", "etl_dim_product", "etl_dim_store", "etl_fact_orders", "etl_fact_payments"]
-STAR_SCHEMA_ASSETS = [
-    Asset(name=table, uri=f"duckdb://warehouse_harshpratapsingh/{table}", group="nammamart_etl")
-    for table in STAR_SCHEMA_TABLES
-]
+
+
+def _assets(*tables: str) -> list:
+    return [Asset(name=t, uri=f"duckdb://warehouse_harshpratapsingh/{t}", group="nammamart_etl") for t in tables]
+
+
+STAR_SCHEMA_ASSETS = _assets(*STAR_SCHEMA_TABLES)
+RECONCILIATION_ASSETS = _assets("etl_payment_reconciliation")
+REPORT_ASSETS = _assets("etl_daily_zone_revenue", "etl_category_margin")
 
 default_args = {
     "owner": "harshpratapsingh",
@@ -250,6 +256,51 @@ def nammamart_etl_harshpratapsingh():
         print(f"[Load] table row counts: {counts}")
         return {k: int(v) for k, v in counts.items()}
 
+    # ── 6. RECONCILE orders with payments ─────────────────────────────────────────────────
+    @task(outlets=RECONCILIATION_ASSETS)
+    def reconcile(load_result: dict):
+        import nammamart_common as nc
+        from nammamart_etl_load import reconcile as run_reconciliation
+
+        with nc.get_connection() as con:
+            return run_reconciliation(con)
+
+    # ── 7. REPORT tables, printed in the task log ─────────────────────────────────────────
+    @task(outlets=REPORT_ASSETS)
+    def report(reconcile_result: dict):
+        import nammamart_common as nc
+        from nammamart_etl_load import build_reports
+
+        with nc.get_connection() as con:
+            return build_reports(con)
+
+    # ── 8. RUN AUDIT: always runs, records the outcome in pipeline_runs ───────────────────
+    @task(trigger_rule="all_done", retries=0)
+    def audit_run(extracted: list, quarantine_result, load_result, report_result):
+        # With trigger_rule="all_done" this task runs even when an upstream task failed.
+        # A failed upstream task has no return value, so its argument arrives as None.
+        import nammamart_common as nc
+
+        ctx = get_current_context()
+        rows_extracted = sum(f["rows"] for e in extracted if e for f in e["files"])
+        rows_quarantined = quarantine_result["quarantined"] if quarantine_result else 0
+        rows_loaded = 0
+        if load_result:
+            rows_loaded = sum(load_result[t] for t in ("etl_dim_customer", "etl_dim_product", "etl_dim_store",
+                                                       "etl_fact_payments", "fact_rows_in_batch"))
+        status = "SUCCESS" if report_result is not None else "FAILED"
+
+        with nc.get_connection() as con:
+            nc.write_pipeline_run(con, ctx["run_id"], DAG_ID, ctx["dag_run"].start_date, nc.utc_now(),
+                                  rows_extracted, rows_loaded, rows_quarantined, status)
+        removed = nc.cleanup_old_run_dirs()
+        print(f"[Audit] {status}: extracted={rows_extracted} loaded={rows_loaded} "
+              f"quarantined={rows_quarantined} (old run folders removed: {removed})")
+        if status == "FAILED":
+            # Fail this task too, otherwise the DAG run would show green even though a step failed.
+            raise RuntimeError("Pipeline failed - see the red task(s) and the pipeline_runs table")
+        return status
+
     # ── Wiring: calling a task with another task's output creates the dependency ──────────
     customers_x = extract_customers()
     products_x = extract_products()
@@ -266,6 +317,8 @@ def nammamart_etl_harshpratapsingh():
     quarantined = quarantine_and_log_dq(customers_v, products_v, stores_v, orders_v, payments_v)
     transformed = transform(customers_v, products_v, stores_v, orders_v, payments_v)
     loaded = load(transformed, quarantined)
+    reported = report(reconcile(loaded))
+    audit_run([customers_x, products_x, stores_x, orders_x, payments_x], quarantined, loaded, reported)
 
 
 nammamart_etl_harshpratapsingh()

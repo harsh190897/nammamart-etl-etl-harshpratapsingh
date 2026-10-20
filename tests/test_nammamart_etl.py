@@ -174,3 +174,24 @@ def test_increment_updates_without_duplicates(validated, tables, tmp_path):
     assert day2["fact_inserted"] == new_orders
     assert day2["fact_updated"] == 9            # 10 corrections, one is quarantined (quarantined product)
     assert day2["etl_fact_orders"] == len(tables["etl_fact_orders"])
+
+
+# ── Reconcile + report (Part A.4) ─────────────────────────────────────────────────────
+def test_reconciliation_and_reports(tables, tmp_path):
+    paths = {name: nc.write_parquet(df, tmp_path / f"{name}.parquet") for name, df in tables.items()}
+    with nc.get_connection(tmp_path / "wh.duckdb") as con:
+        ld.load_star_schema(con, paths, "run_1")
+        recon = ld.reconcile(con)
+        recon_again = ld.reconcile(con)                            # rebuilt, never appended
+        report = ld.build_reports(con)
+        zone_total = con.execute("SELECT sum(net_revenue) FROM etl_daily_zone_revenue").fetchone()[0]
+        fact_total = con.execute("SELECT sum(net_revenue) FROM etl_fact_orders "
+                                 "WHERE order_status = 'DELIVERED'").fetchone()[0]
+        category_total = con.execute("SELECT sum(revenue) FROM etl_category_margin").fetchone()[0]
+
+    assert recon == recon_again
+    assert recon["by_reason"]["PAYMENT_FOR_UNKNOWN_ORDER"] == 8      # matches the Part 0 issues log
+    assert recon["by_reason"]["RETURNED_NOT_REFUNDED"] == 9          # the 9 applied DELIVERED -> RETURNED corrections
+    assert "AMOUNT_MISMATCH" in recon["by_reason"]
+    assert report["category_rows"] == 6
+    assert round(zone_total, 2) == round(fact_total, 2) == round(category_total, 2)

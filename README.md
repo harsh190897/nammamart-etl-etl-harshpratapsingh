@@ -22,12 +22,12 @@ Both write to a local DuckDB warehouse and record every quality check (`dq_resul
 | Part | Status |
 |---|---|
 | 0. Data profiling and issues log | ✅ Done |
-| A. ETL pipeline | 🟡 Extract, validate, quarantine, transform and load done; reconcile, reports and run audit in progress |
+| A. ETL pipeline | ✅ Done (16 tasks: extract, validate, quarantine, transform, load, reconcile, report, run audit) |
 | B. ELT pipeline | ⬜ Not started |
 | C. Scheduling | ✅ Answered (ETL) |
 | D. Data quality dimensions | 🟡 ETL checks done (110 checks, all 6 dimensions); ELT checks in Part B |
 | E. Data governance | ⬜ Not started |
-| F. Observability tests | ⬜ Not started |
+| F. Observability tests | 🟡 Run audit (`pipeline_runs`) done for ETL; experiments not started |
 | G. Recommendation | ⬜ Not started |
 
 ## Project structure
@@ -41,7 +41,7 @@ include/
   nammamart_common.py                 shared paths, business rules, DuckDB connection, PII masking, audit tables
   nammamart_etl_checks.py             ETL data quality rules (pandas): passed / quarantined rows + dq_results
   nammamart_etl_transform.py          ETL transform (pandas): standardise, mask PII, join, derive measures
-  nammamart_etl_load.py               ETL load (DuckDB SQL): star schema, MERGE upsert of the fact table
+  nammamart_etl_load.py               ETL load, reconciliation and reports (DuckDB SQL)
   data/nammamart/                     source CSV files (copied from assignment/nammamart_dataset, never edited)
   sql/                                ELT SQL files (Part B)
   quarantine/harshpratapsingh/        rejected rows with failure_reason (generated, not committed)

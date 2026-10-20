@@ -1,12 +1,16 @@
 """
 include/nammamart_etl_load.py
 -----------------------------
-Load step of the ETL pipeline (DuckDB SQL). Reconcile and Report are added in A.4.
+Load, Reconcile and Report steps of the ETL pipeline (DuckDB SQL).
 
 Star schema in include/warehouse_<name>.duckdb:
     etl_dim_customer, etl_dim_product, etl_dim_store   full refresh every run (master files are full exports)
     etl_fact_orders                                     MERGE (upsert) on order_id, so re-runs never double-count
     etl_fact_payments                                   full refresh (used for reconciliation)
+Reporting:
+    etl_payment_reconciliation   one row per order/payment mismatch, with a reason
+    etl_daily_zone_revenue       daily net revenue by zone and store
+    etl_category_margin          revenue and gross margin by category
 """
 import nammamart_common as nc
 
@@ -150,3 +154,115 @@ def load_star_schema(con, parquet_paths: dict, run_id: str) -> dict:
 
 def _columns(con, table: str) -> list:
     return [row[0] for row in con.execute(f"DESCRIBE {table}").fetchall()]
+
+
+RECONCILIATION_SQL = f"""
+CREATE OR REPLACE TABLE etl_payment_reconciliation AS
+WITH joined AS (
+    SELECT
+        coalesce(o.order_id, p.order_id) AS order_id,
+        p.payment_id,
+        o.order_status,
+        p.payment_status,
+        o.order_amount,
+        p.amount_paid,
+        o.payment_mode AS order_payment_mode,
+        p.payment_mode AS gateway_payment_mode,
+        o.order_id IS NOT NULL AS has_order,
+        p.payment_id IS NOT NULL AS has_payment,
+        coalesce(p.order_in_source, false) AS order_in_source
+    FROM etl_fact_orders o
+    FULL OUTER JOIN etl_fact_payments p ON o.order_id = p.order_id
+),
+mismatches AS (
+    SELECT *, 'ORDER_WITHOUT_PAYMENT' AS reason, order_amount AS amount_at_risk
+    FROM joined WHERE has_order AND NOT has_payment AND order_status IN ('DELIVERED', 'RETURNED')
+    UNION ALL
+    SELECT *, 'PAYMENT_FAILED', order_amount
+    FROM joined WHERE order_status = 'DELIVERED' AND payment_status = 'FAILED'
+    UNION ALL
+    SELECT *, 'AMOUNT_MISMATCH', abs(order_amount - amount_paid)
+    FROM joined WHERE order_status = 'DELIVERED' AND payment_status = 'SUCCESS'
+                  AND abs(order_amount - amount_paid) > {nc.AMOUNT_TOLERANCE}
+    UNION ALL
+    SELECT *, 'REFUNDED_BUT_DELIVERED', amount_paid
+    FROM joined WHERE order_status = 'DELIVERED' AND payment_status = 'REFUNDED'
+    UNION ALL
+    SELECT *, 'RETURNED_NOT_REFUNDED', amount_paid
+    FROM joined WHERE order_status = 'RETURNED' AND payment_status = 'SUCCESS'
+    UNION ALL
+    SELECT *, 'PAID_BUT_CANCELLED', amount_paid
+    FROM joined WHERE order_status = 'CANCELLED' AND payment_status = 'SUCCESS'
+    UNION ALL
+    SELECT *, 'PAYMENT_FOR_UNKNOWN_ORDER', amount_paid
+    FROM joined WHERE has_payment AND NOT has_order AND NOT order_in_source
+    UNION ALL
+    -- the order exists in the source file but was quarantined, so it is not in revenue yet
+    SELECT *, 'PAYMENT_FOR_QUARANTINED_ORDER', amount_paid
+    FROM joined WHERE has_payment AND NOT has_order AND order_in_source
+    UNION ALL
+    SELECT *, 'PAYMENT_MODE_MISMATCH', 0
+    FROM joined WHERE has_order AND has_payment AND order_payment_mode <> gateway_payment_mode
+)
+SELECT order_id, payment_id, reason, round(amount_at_risk, 2) AS amount_at_risk,
+       order_status, payment_status, order_amount, amount_paid, order_payment_mode, gateway_payment_mode
+FROM mismatches
+ORDER BY reason, order_id
+"""
+
+
+def reconcile(con) -> dict:
+    con.execute(RECONCILIATION_SQL)
+    summary = con.execute("""
+        SELECT reason, count(*) AS rows, round(sum(amount_at_risk), 2) AS amount_at_risk
+        FROM etl_payment_reconciliation GROUP BY reason ORDER BY rows DESC""").df()
+    print("[Reconcile] Mismatches by reason:\n" + summary.to_string(index=False))
+    return {
+        "mismatches": int(summary["rows"].sum()),
+        "amount_at_risk": float(summary["amount_at_risk"].sum()),
+        "by_reason": dict(zip(summary["reason"], summary["rows"].astype(int))),
+    }
+
+
+REPORT_SQL = {
+    "etl_daily_zone_revenue": """
+        CREATE OR REPLACE TABLE etl_daily_zone_revenue AS
+        SELECT f.order_date, s.zone, f.store_id, s.store_name,
+               count(*)                     AS delivered_orders,
+               round(sum(f.net_revenue), 2) AS net_revenue
+        FROM etl_fact_orders f
+        JOIN etl_dim_store s USING (store_id)
+        WHERE f.order_status = 'DELIVERED'
+        GROUP BY ALL
+        ORDER BY f.order_date, s.zone, f.store_id""",
+    "etl_category_margin": """
+        CREATE OR REPLACE TABLE etl_category_margin AS
+        SELECT p.category,
+               count(*)                                   AS delivered_orders,
+               sum(f.quantity)                            AS units,
+               round(sum(f.net_revenue), 2)               AS revenue,
+               round(sum(f.quantity * f.cost_price), 2)   AS cost,
+               round(sum(f.gross_margin), 2)              AS gross_margin,
+               round(100 * sum(f.gross_margin) / nullif(sum(f.net_revenue), 0), 2) AS margin_pct
+        FROM etl_fact_orders f
+        JOIN etl_dim_product p USING (product_id)
+        WHERE f.order_status = 'DELIVERED'
+        GROUP BY ALL
+        ORDER BY revenue DESC""",
+}
+
+
+def build_reports(con) -> dict:
+    for sql in REPORT_SQL.values():
+        con.execute(sql)
+    zone = con.execute("""
+        SELECT zone, sum(delivered_orders) AS delivered_orders, round(sum(net_revenue), 2) AS net_revenue
+        FROM etl_daily_zone_revenue GROUP BY zone ORDER BY net_revenue DESC""").df()
+    category = con.execute("SELECT * FROM etl_category_margin").df()
+    print("[Report] Net revenue by zone (all days):\n" + zone.to_string(index=False))
+    print("[Report] etl_category_margin:\n" + category.to_string(index=False))
+    return {
+        "total_net_revenue": float(zone["net_revenue"].sum()),
+        "zone_revenue_rows": con.execute("SELECT count(*) FROM etl_daily_zone_revenue").fetchone()[0],
+        "category_rows": len(category),
+    }

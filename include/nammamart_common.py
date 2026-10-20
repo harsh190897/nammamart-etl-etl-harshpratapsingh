@@ -16,6 +16,7 @@ Contents:
   6. Audit tables: dq_results and pipeline_runs
 """
 import re
+import shutil
 import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -91,6 +92,7 @@ DATE_FORMAT = "%Y-%m-%d"
 LOCAL_TZ = "Asia/Kolkata"           # source timestamps are Bengaluru local time
 FRESHNESS_MAX_AGE_HOURS = 24        # Warning if the newest order is older than this
 VOLUME_DROP_WARN_PCT = 90           # Warning if orders volume drops by more than this vs the previous run
+TMP_KEEP_DAYS = 3                   # run working folders (include/tmp/...) older than this are deleted
 
 DQ_DIMENSIONS = ("Completeness", "Uniqueness", "Validity", "Accuracy", "Consistency", "Timeliness")
 DQ_SEVERITIES = ("Critical", "Warning")
@@ -133,6 +135,18 @@ def run_dir(run_id: str, *parts: str) -> Path:
     folder = TMP_DIR.joinpath(safe_run_id(run_id), *parts)
     folder.mkdir(parents=True, exist_ok=True)
     return folder
+
+
+def cleanup_old_run_dirs(keep_days: int = TMP_KEEP_DAYS) -> int:
+    """Delete run folders older than keep_days. Recent ones are kept so a failed task can be
+    cleared and re-run. They contain raw customer data, so they must not be kept for long."""
+    if not TMP_DIR.exists():
+        return 0
+    cutoff = time.time() - keep_days * 86400
+    old = [d for d in TMP_DIR.iterdir() if d.is_dir() and d.stat().st_mtime < cutoff]
+    for folder in old:
+        shutil.rmtree(folder)
+    return len(old)
 
 
 def read_text_csv(path) -> pd.DataFrame:

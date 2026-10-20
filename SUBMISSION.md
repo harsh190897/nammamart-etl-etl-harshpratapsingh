@@ -13,16 +13,16 @@ Status of every item in section 6 of the assignment brief. ✅ done · 🟡 in p
 
 | # | Checklist item (ASSIGNMENT.md §6) | Status | Where |
 |---|---|---|---|
-| 1 | `dags/nammamart_etl_harshpratapsingh.py`, parsing with no import errors | 🟡 Extract, validate, quarantine, transform and load done (A.1–A.3) | [dags/nammamart_etl_harshpratapsingh.py](dags/nammamart_etl_harshpratapsingh.py) |
+| 1 | `dags/nammamart_etl_harshpratapsingh.py`, parsing with no import errors | ✅ Complete (16 tasks), no import errors | [dags/nammamart_etl_harshpratapsingh.py](dags/nammamart_etl_harshpratapsingh.py) |
 | 2 | `dags/nammamart_elt_harshpratapsingh.py`, parsing with no import errors | ⬜ | Part B |
-| 3 | Helper code in `include/` (quality checks, masking functions) | 🟡 Masking, audit tables, extract helpers, ETL quality rules, transform and load done | [include/nammamart_common.py](include/nammamart_common.py), [include/nammamart_etl_checks.py](include/nammamart_etl_checks.py), [include/nammamart_etl_transform.py](include/nammamart_etl_transform.py), [include/nammamart_etl_load.py](include/nammamart_etl_load.py) |
+| 3 | Helper code in `include/` (quality checks, masking functions) | 🟡 ETL helpers complete (quality rules, masking, transform, load, reconciliation, reports, audit tables); ELT helpers in Part B | [include/nammamart_common.py](include/nammamart_common.py), [include/nammamart_etl_checks.py](include/nammamart_etl_checks.py), [include/nammamart_etl_transform.py](include/nammamart_etl_transform.py), [include/nammamart_etl_load.py](include/nammamart_etl_load.py) |
 | 4 | SQL files in `include/sql/` | ⬜ | Part B |
 | 5 | `SUBMISSION.md`: Data Issues Log (Part 0) | ✅ | [Part 0](#part-0-discovery-and-data-profiling) |
 | 6 | `SUBMISSION.md`: answers to Part C | ✅ Answered; screenshot pending | [Part C](#part-c-scheduling) |
 | 7 | `SUBMISSION.md`: governance answers (Part E) | ⬜ | [Part E](#part-e-data-governance) |
 | 8 | `SUBMISSION.md`: observability results table (Part F) | ⬜ | [Part F](#part-f-observability-tests) |
 | 9 | `SUBMISSION.md`: recommendation (Part G) | ⬜ | [Part G](#part-g-recommendation-to-the-cto) |
-| 10 | Screenshots: both DAGs green in Graph view, 9:00 AM IST schedule, one quarantine file, `dq_results`, `pipeline_runs`, payment reconciliation | ⬜ | [Screenshots](#screenshots) |
+| 10 | Screenshots: both DAGs green in Graph view, 9:00 AM IST schedule, one quarantine file, `dq_results`, `pipeline_runs`, payment reconciliation | 🟡 1 of 7 (ETL graph) | [Screenshots](#screenshots) |
 | 11 | Six business questions, SQL + result, from both pipelines | ⬜ | [Business questions](#business-questions) |
 | 12 | No API keys, passwords, webhook URLs or unmasked customer data outside `include/data/` | ✅ Checked on every commit | [.gitignore](.gitignore) |
 
@@ -166,17 +166,29 @@ Three proposed severities in the log above were changed from Critical to Warning
 
 ## Part A: ETL pipeline
 
-**Status:** 🟡 in progress. Extract, validate, quarantine, transform and load complete (A.1–A.3).
+**Status:** ✅ complete (A.1–A.4).
 
 **DAG:** [`dags/nammamart_etl_harshpratapsingh.py`](dags/nammamart_etl_harshpratapsingh.py), flow **Extract → Validate → Transform → Load**.
-**Helper code:** [`include/nammamart_common.py`](include/nammamart_common.py) (paths, business rules, DuckDB connection, masking, audit tables), [`include/nammamart_etl_checks.py`](include/nammamart_etl_checks.py) (data quality rules in pandas), [`include/nammamart_etl_transform.py`](include/nammamart_etl_transform.py) (standardise, mask, join, derive in pandas), [`include/nammamart_etl_load.py`](include/nammamart_etl_load.py) (star schema load in DuckDB SQL).
+**Helper code:** [`include/nammamart_common.py`](include/nammamart_common.py) (paths, business rules, DuckDB connection, masking, audit tables), [`include/nammamart_etl_checks.py`](include/nammamart_etl_checks.py) (data quality rules in pandas), [`include/nammamart_etl_transform.py`](include/nammamart_etl_transform.py) (standardise, mask, join, derive in pandas), [`include/nammamart_etl_load.py`](include/nammamart_etl_load.py) (star schema load, reconciliation and reports in DuckDB SQL).
 
 | Step | Status | Tasks |
 |---|---|---|
 | A.1 Extract | ✅ | `extract_customers`, `extract_products`, `extract_stores`, `extract_orders`, `extract_payments` (run in parallel) |
 | A.2 Validate + quarantine | ✅ | `validate_customers`, `validate_products`, `validate_stores`, `validate_orders`, `validate_payments`, `quarantine_and_log_dq` |
 | A.3 Transform + load (star schema) | ✅ | `transform`, `load` |
-| A.4 Reconcile, report, run audit | ⬜ | |
+| A.4 Reconcile, report, run audit | ✅ | `reconcile`, `report`, `audit_run` |
+
+```
+extract_customers ─► validate_customers ─┐
+extract_products  ─► validate_products  ─┼─► validate_orders ─┬─► quarantine_and_log_dq ─┐
+extract_stores    ─► validate_stores    ─┘         ▲          │                          ├─► load ─► reconcile ─► report ─► audit_run
+extract_orders    ─────────────────────────────────┘          └─► transform ─────────────┘
+extract_payments  ─► validate_payments (also uses extract_orders)
+```
+
+Green run in the Airflow UI (Graph view, all 16 tasks `success`):
+
+![ETL DAG in Graph view, green run](docs/screenshots/01_etl_graph_green.png)
 
 **Extract (A.1).** Each task copies its source file into a per-run folder (`include/tmp/harshpratapsingh/<run_id>/extract/`), reads it as text, checks the header against the expected columns, and passes only the file path and row count to the next task. `extract_orders` also picks up every next-day file matching `orders_*_increment.csv`.
 
@@ -228,7 +240,28 @@ Results of runs on 2026-10-20:
 
 Of the 10 corrections in the increment file, 9 were applied; the tenth points to a quarantined product and is in the increment's quarantine file. Table sizes: `etl_dim_customer` 397, `etl_dim_product` 142, `etl_dim_store` 15, `etl_fact_payments` 2,209. `etl_fact_orders` holds 2,091 DELIVERED orders (net revenue ₹1,128,410.45), 147 CANCELLED and 75 RETURNED.
 
-_Step A.4 (reconcile, reports, run audit) to be documented when completed._
+**Reconcile (A.4).** `reconcile` compares every order in `etl_fact_orders` with every payment in `etl_fact_payments` (a full outer join on `order_id`) and rebuilds `etl_payment_reconciliation` on every run: one row per mismatch, with a `reason` and the `amount_at_risk`.
+
+| Reason | Rule | Amount at risk | Rows (2026-10-20) | ₹ at risk |
+|---|---|---|---|---|
+| `PAYMENT_FOR_QUARANTINED_ORDER` | Payment whose order exists in the source file but was quarantined | amount paid | 199 | 152,961.48 |
+| `ORDER_WITHOUT_PAYMENT` | DELIVERED or RETURNED order with no payment | order amount | 164 | 89,441.50 |
+| `PAYMENT_FAILED` | DELIVERED order whose payment FAILED | order amount | 42 | 25,722.25 |
+| `AMOUNT_MISMATCH` | SUCCESS payment ≠ order amount (more than ₹0.01) | difference | 11 | 560.00 |
+| `RETURNED_NOT_REFUNDED` | RETURNED order whose payment is still SUCCESS | amount paid | 9 | 3,662.70 |
+| `PAYMENT_FOR_UNKNOWN_ORDER` | Payment whose `order_id` is in no orders file | amount paid | 8 | 4,580.57 |
+| `REFUNDED_BUT_DELIVERED`, `PAID_BUT_CANCELLED`, `PAYMENT_MODE_MISMATCH` | Checked on every run | | 0 | 0 |
+
+Of the 164 orders without a payment, 28 are September orders (the same 28 found in profiling) and 136 are new orders from 1 October: the payments export ends at 2026-09-30 23:47, so their payments have not arrived yet. The 9 `RETURNED_NOT_REFUNDED` rows are exactly the 9 DELIVERED → RETURNED corrections applied from the increment file. Their payments are still `SUCCESS`, so finance should check whether the refunds were issued.
+
+**Report (A.4).** `report` rebuilds two reporting tables and prints them in the task log:
+
+- `etl_daily_zone_revenue`: net revenue and delivered orders per day, zone and store (459 rows).
+- `etl_category_margin`: delivered orders, units, revenue, cost, gross margin and margin % per category (6 rows).
+
+The total of both tables equals the DELIVERED net revenue in `etl_fact_orders` (₹1,128,410.45), which is checked by a unit test. `reconcile` and `report` also publish their tables as Airflow Assets, so the Assets page shows 8 `nammamart_etl` tables.
+
+**Run audit (A.4).** `audit_run` uses `trigger_rule="all_done"`, so it runs even when an upstream task failed, and writes one row per run to `pipeline_runs` (see [Part F](#part-f-observability-tests)). If the run did not reach the report, it records `FAILED` and then fails itself, so the DAG run is shown as failed instead of green. It also deletes run folders in `include/tmp/` that are older than 3 days.
 
 ---
 
@@ -355,7 +388,20 @@ _To be completed._
 **Status:** ⬜ not started.
 
 ### Run audit (`pipeline_runs`)
-_To be completed._
+
+Both DAGs end with an `audit_run` task (`trigger_rule="all_done"`) that writes one row per run to `pipeline_runs`: `run_id`, `dag_id`, `start_time`, `end_time` (UTC), `rows_extracted`, `rows_loaded`, `rows_quarantined` and `status` (SUCCESS / FAILED). A re-run of the same `run_id` replaces its row instead of adding a second one.
+
+ETL examples from testing on 2026-10-20:
+
+| Run | status | rows_extracted | rows_loaded | rows_quarantined | Duration |
+|---|---|---|---|---|---|
+| Normal run | SUCCESS | 5,372 | 5,076 | 287 | 2.4 s |
+| Re-run, same files | SUCCESS | 5,372 | 5,076 | 287 | 2.3 s |
+| `products.csv` missing | FAILED | 5,220 | 0 | 0 | 127 s (2 retries of 1 minute) |
+
+`rows_loaded` counts the rows written to the star schema (dimensions, payments and the batch of fact orders). `rows_extracted` = `rows_loaded` + `rows_quarantined` + 9, because 9 rows of the increment file replace an older version of the same order.
+
+_ELT rows to be added in Part B._
 
 ### Experiments
 
@@ -412,7 +458,7 @@ Stored in [`docs/screenshots/`](docs/screenshots/).
 
 | # | Required screenshot | File | Status |
 |---|---|---|---|
-| 1 | ETL DAG in Graph view, green run | `docs/screenshots/01_etl_graph_green.png` | ⬜ |
+| 1 | ETL DAG in Graph view, green run | [`docs/screenshots/01_etl_graph_green.png`](docs/screenshots/01_etl_graph_green.png) | ✅ |
 | 2 | ELT DAG in Graph view, green run | `docs/screenshots/02_elt_graph_green.png` | ⬜ |
 | 3 | Schedule showing 9:00 AM IST and the next run | `docs/screenshots/03_schedule_9am_ist.png` | ⬜ |
 | 4 | One quarantine file | `docs/screenshots/04_quarantine_file.png` | ⬜ |

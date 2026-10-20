@@ -1,7 +1,43 @@
 # NammaMart Quick Commerce: ETL & ELT Pipeline Submission
 
 **Learner:** Harsh Pratap Singh
-**Module:** FDE Module 2, Data Engineering Foundations
+**Module:** FDAIE Module 2, Data Engineering Foundations
+**Repository:** https://github.com/harsh190897/nammamart-etl-etl-harshpratapsingh
+**Assignment brief:** [assignment/ASSIGNMENT.md](assignment/ASSIGNMENT.md)
+
+---
+
+## Submission checklist
+
+Status of every item in section 6 of the assignment brief. ✅ done · 🟡 in progress · ⬜ not started
+
+| # | Checklist item (ASSIGNMENT.md §6) | Status | Where |
+|---|---|---|---|
+| 1 | `dags/nammamart_etl_harshpratapsingh.py`, parsing with no import errors | 🟡 Extract step done (A.1) | [dags/nammamart_etl_harshpratapsingh.py](dags/nammamart_etl_harshpratapsingh.py) |
+| 2 | `dags/nammamart_elt_harshpratapsingh.py`, parsing with no import errors | ⬜ | Part B |
+| 3 | Helper code in `include/` (quality checks, masking functions) | 🟡 Masking, audit tables, extract helpers done | [include/nammamart_common.py](include/nammamart_common.py) |
+| 4 | SQL files in `include/sql/` | ⬜ | Part B |
+| 5 | `SUBMISSION.md`: Data Issues Log (Part 0) | ✅ | [Part 0](#part-0-discovery-and-data-profiling) |
+| 6 | `SUBMISSION.md`: answers to Part C | ✅ Answered; screenshot pending | [Part C](#part-c-scheduling) |
+| 7 | `SUBMISSION.md`: governance answers (Part E) | ⬜ | [Part E](#part-e-data-governance) |
+| 8 | `SUBMISSION.md`: observability results table (Part F) | ⬜ | [Part F](#part-f-observability-tests) |
+| 9 | `SUBMISSION.md`: recommendation (Part G) | ⬜ | [Part G](#part-g-recommendation-to-the-cto) |
+| 10 | Screenshots: both DAGs green in Graph view, 9:00 AM IST schedule, one quarantine file, `dq_results`, `pipeline_runs`, payment reconciliation | ⬜ | [Screenshots](#screenshots) |
+| 11 | Six business questions, SQL + result, from both pipelines | ⬜ | [Business questions](#business-questions) |
+| 12 | No API keys, passwords, webhook URLs or unmasked customer data outside `include/data/` | ✅ Checked on every commit | [.gitignore](.gitignore) |
+
+## Contents
+
+- [Part 0: Discovery and data profiling](#part-0-discovery-and-data-profiling)
+- [Part A: ETL pipeline](#part-a-etl-pipeline)
+- [Part B: ELT pipeline](#part-b-elt-pipeline)
+- [Part C: Scheduling](#part-c-scheduling)
+- [Part D: Data quality dimensions](#part-d-data-quality-dimensions)
+- [Business questions](#business-questions)
+- [Part E: Data governance](#part-e-data-governance)
+- [Part F: Observability tests](#part-f-observability-tests)
+- [Part G: Recommendation to the CTO](#part-g-recommendation-to-the-cto)
+- [Screenshots](#screenshots)
 
 ---
 
@@ -91,8 +127,8 @@ Row keys in the log are written as `<id>@row<N>`, where `N` is the line number i
 | 20 | `payments.csv` | PAY0000522@row1454, PAY0000044@row1625 | `payment_mode` | Unrecognised payment_mode | Validity | Quarantine or ask client | Critical | 2 |
 | 21 | `payments.csv` | PAY0002188@row96, PAY0001850@row609, PAY0001954@row822 | `payment_mode` | Mode needs standardising | Validity | Map to standard names | Warning | 8 |
 | 22 | `payments.csv` | PAY0001568@row71, PAY0002175@row346, PAY0000751@row434 | `amount_paid` | Negative amount_paid | Accuracy | amount_paid >= 0 (refunds should be status REFUNDED) | Critical | 6 |
-| 23 | `payments.csv` | PAY0001568@ORD001031, PAY0000354@ORD001937, PAY0000779@ORD001840 | `amount_paid` | SUCCESS payment amount != order_amount | Consistency | SUCCESS => amount_paid == order_amount | Critical | 14 |
-| 24 | `payments.csv` | PAY0002219@row188, PAY0002220@row689, PAY0002223@row966 | `order_id` | Payment for an order that does not exist | Consistency | FK order_id -> orders | Critical | 8 |
+| 23 | `payments.csv` | PAY0001568@ORD001031, PAY0000354@ORD001937, PAY0000779@ORD001840 | `amount_paid` | SUCCESS payment amount != order_amount | Consistency | Report in the payment reconciliation table (AMOUNT_MISMATCH), see 0.7 | Warning | 14 |
+| 24 | `payments.csv` | PAY0002219@row188, PAY0002220@row689, PAY0002223@row966 | `order_id` | Payment for an order that does not exist | Consistency | FK order_id -> orders; report in the payment reconciliation table, see 0.7 | Warning | 8 |
 | 25 | `payments.csv` | PAY0000522, PAY0000044 | `payment_mode` | Payment mode differs from the order's mode | Consistency | Modes should match | Warning | 2 |
 | 26 | `payments.csv` | PAY0000396@row146, PAY0000127@row309, PAY0001908@row411 | `payment_ts` | payment_ts in the future | Timeliness | payment_ts <= run time | Critical | 7 |
 | 27 | `customers.csv` | C00355@row4, C00394@row202, C00233@row276 | `city` | Missing city | Completeness | Warn | Warning | 6 |
@@ -107,7 +143,7 @@ Row keys in the log are written as `<id>@row<N>`, where `N` is the line number i
 | 36 | `products.csv` | P0030@row152, P0140@row153 | `product_id` | Duplicate product_id ('(old)' rows with different mrp) | Uniqueness | One row per product_id; drop '(old)' version | Critical | 2 |
 | 37 | `products.csv` | P0019@row20, P0073@row74, P0074@row75 | `cost_price` | cost_price greater than mrp | Accuracy | cost_price <= mrp | Critical | 5 |
 | 38 | `products.csv` | P0109@row110 | `mrp` | mrp zero or negative | Accuracy | mrp > 0 | Critical | 1 |
-| 39 | `stores.csv` | S07@row8 | `zone` | Missing zone | Completeness | zone NOT NULL (needed for zone revenue) | Critical | 1 |
+| 39 | `stores.csv` | S07@row8 | `zone` | Missing zone | Completeness | Keep the store; show zone as 'Unknown' and log it, see 0.7 | Warning | 1 |
 | 40 | `stores.csv` | S12@row13 | `capacity_orders_per_day` | Capacity is zero | Accuracy | capacity > 0 | Warning | 1 |
 
 ### 0.6 Questions for the client before building
@@ -116,20 +152,217 @@ Row keys in the log are written as `<id>@row<N>`, where `N` is the line number i
 2. **Negative quantities and negative payments.** "Some orders have quantity 0 or negative and a negative order amount, and some payments have a negative `amount_paid`, yet most are marked DELIVERED. Are these returns or refunds that should be recorded as `RETURNED`/`REFUNDED`, or data-entry errors to reject?"
 3. **Orders and payments that don't match.** "28 delivered or returned orders have no payment, 8 payments point to orders we can't find, and 14 successful payments differ from the order amount. Is the gateway export incomplete or delayed, or are these real collection problems finance needs to chase? And should a mismatched order still count as revenue?"
 
+### 0.7 Severity changes made when designing the pipelines
+
+Three proposed severities in the log above were changed from Critical to Warning while designing the pipelines (the rows are already updated). Each one would otherwise have removed valid data from the finance tables:
+
+| Issue | First proposal | Final rule | Reason |
+|---|---|---|---|
+| `stores.csv`: S07 has no `zone` | Critical | Warning; zone shown as `Unknown` | S07 is a real store with 176 orders (about 7% of all orders). Quarantining it would hide all of them from revenue; only the zone label is missing |
+| `payments.csv`: payment for an order that does not exist | Critical | Warning; listed in the payment reconciliation table | The payment record itself is valid. The mismatch is a finance question, and the reconciliation table is where finance looks for it |
+| `payments.csv`: SUCCESS payment ≠ order amount | Critical | Listed in the payment reconciliation table | It needs both files to detect, so it is a reconciliation finding, not a fault in one row |
+
+---
+
+## Part A: ETL pipeline
+
+**Status:** 🟡 in progress. Extract step complete (A.1).
+
+**DAG:** [`dags/nammamart_etl_harshpratapsingh.py`](dags/nammamart_etl_harshpratapsingh.py), flow **Extract → Validate → Transform → Load**.
+
+| Step | Status | Tasks |
+|---|---|---|
+| A.1 Extract | ✅ | `extract_customers`, `extract_products`, `extract_stores`, `extract_orders`, `extract_payments` (run in parallel) |
+| A.2 Validate + quarantine | ⬜ | |
+| A.3 Transform + load (star schema) | ⬜ | |
+| A.4 Reconcile, report, run audit | ⬜ | |
+
+**Extract (A.1).** Each task copies its source file into a per-run folder (`include/tmp/harshpratapsingh/<run_id>/extract/`), reads it as text, checks the header against the expected columns, and passes only the file path and row count to the next task. `extract_orders` also picks up every next-day file matching `orders_*_increment.csv`.
+
+_Remaining steps to be documented as they are completed._
+
+---
+
+## Part B: ELT pipeline
+
+**Status:** ⬜ not started.
+
+_To be completed._
+
 ---
 
 ## Part C: Scheduling
 
+**Status:** ✅ answered for the ETL DAG; the ELT DAG will use the same settings. Screenshot pending.
+
+| Setting | Value | Why |
+|---|---|---|
+| `schedule` | `"0 9 * * 1-6"` | 09:00, Monday to Saturday |
+| `start_date` | `pendulum.datetime(2026, 10, 1, tz="Asia/Kolkata")` | Makes Airflow read the cron in IST |
+| `catchup` | `False` | Do not create runs for past days (see below) |
+| `retries` / `retry_delay` | 2 / 1 minute | A missing file or a locked warehouse often clears within minutes |
+| `execution_timeout` | 10 minutes per task | A hung task is stopped instead of blocking the report |
+| `dagrun_timeout` | 25 minutes | A run not finished by 09:25 is marked failed, before the 09:30 review |
+| `max_active_runs` | 1 | A manual run and the scheduled run never write to the warehouse at the same time |
+
+**Why `catchup=False`.** Every run reads the same full set of files, so back-filling one run per missed day since `start_date` would only reload identical data and delay today's run. If a day is missed, one run with the latest files is what the business needs.
+
+**1. What is your cron expression?**
+`0 9 * * 1-6`: minute 0, hour 9, every day of the month, every month, days of the week 1–6 (Monday to Saturday).
+
+**2. What time does the run show in UTC in the Airflow UI?**
+**03:30 UTC.** IST is UTC+5:30 with no daylight saving, so 09:00 IST is always 03:30 UTC. Observed on 2026-10-20: the scheduled run is named `scheduled__2026-10-20T03:30:00+00:00`.
+
+**3. What would happen at 9 AM if you had left the `start_date` in UTC?**
+Airflow would read `0 9 * * 1-6` as 09:00 **UTC**, which is **14:30 IST**: five hours after the 09:30 review, every day. Nothing at 9 AM IST would show that anything was wrong; the numbers would simply arrive in the afternoon.
+
+**4. What happens if your laptop or Docker is off at 9 AM?**
+The scheduler is not running, so nothing runs at 09:00 and the numbers are not ready for the review. When Airflow starts again, because `catchup=False` it creates **one** run for the most recent missed schedule (not one per missed day) and starts it straight away. Observed on 2026-10-20: when the DAG was unpaused in the afternoon, after 09:00 IST had already passed, Airflow immediately ran `scheduled__2026-10-20T03:30:00+00:00` (started 08:51 UTC = 14:21 IST), and only that one run. In production Airflow should run on an always-on server or a managed service, with an alert when the 09:00 run has not succeeded by 09:25.
+
+---
+
+## Part D: Data quality dimensions
+
+**Status:** ⬜ not started. Checks are written to the `dq_results` table on every run.
+
+| Dimension | ETL checks (Python) | ELT checks (SQL) | Severity |
+|---|---|---|---|
+| Completeness | | | |
+| Uniqueness | | | |
+| Validity | | | |
+| Accuracy | | | |
+| Consistency | | | |
+| Timeliness | | | |
+
 _To be completed._
+
+---
+
+## Business questions
+
+Each question is answered with one query on the final tables of **both** pipelines.
+
+### Q1. Daily net revenue by zone and by store (delivered orders only, after discount)
+_ETL: SQL + result. ELT: SQL + result. To be completed._
+
+### Q2. Revenue and gross margin by product category (margin = revenue − quantity × cost_price)
+_To be completed._
+
+### Q3. Average delivery time per store, and the % of delivered orders within 15 minutes
+_To be completed._
+
+### Q4. Revenue by payment mode, and the total amount that doesn't reconcile with the payment gateway
+_To be completed._
+
+### Q5. Top 10 customers by spend, with loyalty tier (no raw email or phone shown)
+_To be completed._
+
+### Q6. Number of rows rejected today, by file and by reason
+_To be completed._
+
+---
 
 ## Part E: Data governance
 
+**Status:** ⬜ not started.
+
+### E1. Ownership
 _To be completed._
 
-## Part F: Observability results
+### E2. Data dictionary
+_To be completed._
+
+### E3. Lineage
+_To be completed._
+
+### E4. Personal data
+_To be completed._
+
+### E5. Access control
+_To be completed._
+
+### E6. Retention
+_To be completed._
+
+### E7. Secrets
+_To be completed._
+
+### E8. Audit
+_To be completed._
+
+### E9. Change history
+_To be completed._
+
+---
+
+## Part F: Observability tests
+
+**Status:** ⬜ not started.
+
+### Run audit (`pipeline_runs`)
+_To be completed._
+
+### Experiments
+
+Format for each: **Expected → Observed → Where I saw it → What I would change.**
+
+| # | Experiment | Pipeline | Expected | Observed | Where I saw it | What I would change |
+|---|---|---|---|---|---|---|
+| 1 | Happy path | ETL | | | | |
+| 1 | Happy path | ELT | | | | |
+| 2 | Re-run (idempotency) | ETL | | | | |
+| 2 | Re-run (idempotency) | ELT | | | | |
+| 3 | Incremental load | ETL | | | | |
+| 3 | Incremental load | ELT | | | | |
+| 4 | Missing source file | ETL | | | | |
+| 4 | Missing source file | ELT | | | | |
+| 5 | New bad data | ETL | | | | |
+| 5 | New bad data | ELT | | | | |
+| 6 | Schema change | ETL | | | | |
+| 6 | Schema change | ELT | | | | |
+| 7 | Volume anomaly | ETL | | | | |
+| 7 | Volume anomaly | ELT | | | | |
+| 8 | Distribution drift | ETL | | | | |
+| 8 | Distribution drift | ELT | | | | |
+| 9 | Freshness | ETL | | | | |
+| 9 | Freshness | ELT | | | | |
+| 10 | Recovery | ETL | | | | |
+| 10 | Recovery | ELT | | | | |
+
+### Five pillars of data observability
+
+| Pillar | How my setup covers it | Strength |
+|---|---|---|
+| Freshness | | |
+| Volume | | |
+| Schema | | |
+| Distribution | | |
+| Lineage | | |
 
 _To be completed._
+
+---
 
 ## Part G: Recommendation to the CTO
 
+**Status:** ⬜ not started.
+
 _To be completed._
+
+---
+
+## Screenshots
+
+Stored in [`docs/screenshots/`](docs/screenshots/).
+
+| # | Required screenshot | File | Status |
+|---|---|---|---|
+| 1 | ETL DAG in Graph view, green run | `docs/screenshots/01_etl_graph_green.png` | ⬜ |
+| 2 | ELT DAG in Graph view, green run | `docs/screenshots/02_elt_graph_green.png` | ⬜ |
+| 3 | Schedule showing 9:00 AM IST and the next run | `docs/screenshots/03_schedule_9am_ist.png` | ⬜ |
+| 4 | One quarantine file | `docs/screenshots/04_quarantine_file.png` | ⬜ |
+| 5 | Query result: `dq_results` | `docs/screenshots/05_dq_results.png` | ⬜ |
+| 6 | Query result: `pipeline_runs` | `docs/screenshots/06_pipeline_runs.png` | ⬜ |
+| 7 | Query result: payment reconciliation table | `docs/screenshots/07_payment_reconciliation.png` | ⬜ |
+
+Screenshots of tables must not show unmasked customer data.

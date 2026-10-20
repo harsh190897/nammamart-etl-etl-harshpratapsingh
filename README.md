@@ -28,7 +28,7 @@ Both write to a local DuckDB warehouse and record every quality check (`dq_resul
 | D. Data quality dimensions | ✅ 110 checks across all 6 dimensions, in Python (ETL) and SQL (ELT), written to `dq_results` every run |
 | E. Data governance | ✅ All 9 answers, with a data dictionary for the star schema, a lineage trace and an audit example |
 | F. Observability tests | ✅ Run audit (`pipeline_runs`) in both DAGs; 10 experiments (plus 8b and 9b) run on both DAGs; five-pillar mapping |
-| G. Recommendation | ⬜ Not started |
+| G. Recommendation | ✅ ELT with a quality gate for Finance, based on the experiments and a 1000× scale test |
 
 ## Project structure
 

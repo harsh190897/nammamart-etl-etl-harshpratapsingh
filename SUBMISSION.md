@@ -21,7 +21,7 @@ Status of every item in section 6 of the assignment brief. ✅ done · 🟡 in p
 | 6 | `SUBMISSION.md`: answers to Part C | ✅ Answered, with schedule screenshot | [Part C](#part-c-scheduling) |
 | 7 | `SUBMISSION.md`: governance answers (Part E) | ✅ | [Part E](#part-e-data-governance) |
 | 8 | `SUBMISSION.md`: observability results table (Part F) | ✅ | [Part F](#part-f-observability-tests) |
-| 9 | `SUBMISSION.md`: recommendation (Part G) | ⬜ | [Part G](#part-g-recommendation-to-the-cto) |
+| 9 | `SUBMISSION.md`: recommendation (Part G) | ✅ | [Part G](#part-g-recommendation-to-the-cto) |
 | 10 | Screenshots: both DAGs green in Graph view, 9:00 AM IST schedule, one quarantine file, `dq_results`, `pipeline_runs`, payment reconciliation | ✅ 7 of 7 | [Screenshots](#screenshots) |
 | 11 | Six business questions, SQL + result, from both pipelines | ✅ All six answered from both pipelines; results identical | [Business questions](#business-questions) |
 | 12 | No API keys, passwords, webhook URLs or unmasked customer data outside `include/data/` | ✅ Checked on every commit | [.gitignore](.gitignore) |
@@ -1216,9 +1216,32 @@ The common thread across experiments 4, 7, 8 and 9 is that **nothing pushes an a
 
 ## Part G: Recommendation to the CTO
 
-**Status:** ⬜ not started.
+**Status:** ✅ done.
 
-_To be completed._
+**To:** Sameer, CTO, NammaMart  **From:** Harsh Pratap Singh  **Date:** 20 October 2026
+**Subject:** ETL or ELT for the 9 AM numbers
+
+**Recommendation: adopt ELT, with a quality gate that gives Finance the same guarantee as ETL.** I built both pipelines on the same five files and ran them side by side. For all six business questions they give **identical** answers, down to the paisa: September revenue is ₹1,056,219.25 in both, and 0 of 444 day×store rows differ. So the choice is not about which one is "right". It is about which one is easier to trust, change and grow. On the evidence below, that is ELT.
+
+| Criterion | What I observed | Better |
+|---|---|---|
+| **Auditability** | ELT keeps every row as received in `raw_*`, with file, row number and run. Tracing a mart number to source rows (E3), showing a rejected order as received (E8) and rebuilding "September as reported" after a return (E9) are all SQL queries in one database. ETL keeps rejected rows in quarantine files, but the as-received copy of a *loaded* row is lost once the 3-day run folder is deleted, and the `MERGE` overwrote the 9 returned orders' DELIVERED version. | **ELT** |
+| **Data quality guarantee** | Both apply the same 110 checks and reject the same 287 rows. ETL's guarantee is physical: a bad row never enters `etl_fact_orders`. ELT's guarantee depends on every mart reading only `dq_status = 'VALID'`. All six of mine do, and tests compare them with ETL, but a new query could forget the filter. In experiment 8 (prices ×100 for one store) ETL kept that store's last good revenue, while ELT dropped it by 95 %. Neither raised an alert. | **ETL**, narrowly |
+| **Ease of change** | In ELT a new report is one SQL file: the six marts together take 0.4 s at 1000× data, and analysts can read and review SQL. A new rule is one line in a staging file. In ETL a change means editing Python and redeploying. Schema changes failed loudly and safely in both (experiment 6). | **ELT** |
+| **Performance as data grows 1000×** | Scale test on my laptop (10 cores, 16 GB) with orders and payments copied 1,000 times: 2.4 M orders and 2.2 M payments. **ETL 50.7 s, peak 2.8 GB; ELT 47.2 s, peak 2.6 GB.** Both returned exactly 1000× the revenue, and both scaled linearly (100×: 5.0 s vs 3.7 s). ETL holds everything in pandas memory, so beyond about 10,000× it needs chunking or a rewrite. ELT's SQL runs on DuckDB, which spills to disk, and moves almost unchanged to PostgreSQL or a cloud warehouse. Today, on real data, the runs take 13 s (ETL) and 19 s (ELT); most of ELT's extra time is Airflow scheduling its 19 small tasks. | **ELT** (equal today, better path) |
+| **Cost** | Both run on open-source tools (Airflow, DuckDB) on one machine, so licence cost is ₹0 and compute is the same. ELT costs more storage: raw is append-only and grows by about 5,400 rows a run today (about 1.7 M a year), or about 4.6 M rows a run at 1000×. A retention rule (Part E6) caps that. SQL skills are easier to hire for than pandas pipeline skills. | **Even**; ELT needs retention |
+
+**How to keep Finance's guarantee in ELT.** Finance's concern ("a bad row must never reach the CFO's dashboard") is met by four controls:
+1. Finance users get read access **only** to the `mart_*` schema, which is built from VALID rows. They have no access to raw or staging.
+2. Every mart keeps a test that it matches the ETL logic. The ETL pipeline stays as the reference for a quarter, then is retired.
+3. Experiment 8 showed numbers can be green but wrong. Add a Slack alert on any failed run or Critical warning, and distribution checks on price and revenue per store.
+4. Add an order-history table, so Finance can see September as closed and Operations can see it as now known.
+
+**Top 3 risks of this design**
+
+1. **Unfiltered reads of bad data.** Raw and staging contain rejected rows on purpose. If an analyst or a new mart reads `stg_orders` without `dq_status = 'VALID'`, rejected orders reach a report. *Mitigation:* access only to marts for business users, a `VALID`-only view, and a CI check that every mart filters on `dq_status`.
+2. **Personal data and growth in raw.** `raw_customers` and the customers quarantine files hold unmasked names, emails and phone numbers. Raw is append-only, so it grows every run. Under the DPDP Act 2023 this is a breach and compliance risk, as well as a storage cost. *Mitigation:* a restricted raw schema, the retention and erasure jobs from Part E6, and loading each file only once (by checksum).
+3. **Silent, plausible errors on a single DuckDB file.** In experiment 8b, consistent prices ×100 raised revenue 7.4× with every check green. Volume and freshness problems were only Warnings, and nothing pushed an alert. One DuckDB file also allows one writer at a time: the two DAGs already waited on each other's lock at 09:00. *Mitigation:* alerts and distribution checks now; move to a server database when a second writer or more users are added.
 
 ---
 

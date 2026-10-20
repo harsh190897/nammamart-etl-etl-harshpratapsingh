@@ -23,7 +23,7 @@ Both write to a local DuckDB warehouse and record every quality check (`dq_resul
 |---|---|
 | 0. Data profiling and issues log | ✅ Done |
 | A. ETL pipeline | ✅ Done (16 tasks: extract, validate, quarantine, transform, load, reconcile, report, run audit) |
-| B. ELT pipeline | ✅ Done (19 tasks: raw, staging, marts, run audit; same checks, rejected rows and totals as ETL). Business-question write-up in progress |
+| B. ELT pipeline | ✅ Done (19 tasks: raw, staging, marts, run audit). Same checks, rejected rows and totals as ETL; September totals match |
 | C. Scheduling | ✅ Answered (ETL) |
 | D. Data quality dimensions | ✅ 110 checks across all 6 dimensions, in Python (ETL) and SQL (ELT), written to `dq_results` every run |
 | E. Data governance | ⬜ Not started |
@@ -53,6 +53,7 @@ include/
   tmp/harshpratapsingh/               per-run working files (generated, not committed)
   warehouse_harshpratapsingh.duckdb   DuckDB warehouse (generated, not committed)
 profiling/                            Part 0 profiling scripts and the Data Issues Log CSVs
+analysis/                             business questions Q1-Q6: SQL for both pipelines + script that runs and compares them
 tests/                                unit tests (pytest); tests/dags: DAG structure tests and Astro's DAG integrity test
 docs/screenshots/                     screenshots referenced in SUBMISSION.md
 ```
@@ -80,6 +81,7 @@ pip install pandas duckdb pytest
 python profiling/profile_files.py > profiling/profile_output.txt
 python profiling/find_issues.py
 pytest tests/test_nammamart_common.py tests/test_nammamart_etl.py tests/test_nammamart_elt.py -v
+python analysis/business_questions.py   # answer Q1-Q6 from both pipelines' tables (no DAG running)
 ```
 
 ## Data and privacy

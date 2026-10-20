@@ -23,7 +23,7 @@ Status of every item in section 6 of the assignment brief. ✅ done · 🟡 in p
 | 8 | `SUBMISSION.md`: observability results table (Part F) | ⬜ | [Part F](#part-f-observability-tests) |
 | 9 | `SUBMISSION.md`: recommendation (Part G) | ⬜ | [Part G](#part-g-recommendation-to-the-cto) |
 | 10 | Screenshots: both DAGs green in Graph view, 9:00 AM IST schedule, one quarantine file, `dq_results`, `pipeline_runs`, payment reconciliation | 🟡 6 of 7 (ELT graph pending, Part B) | [Screenshots](#screenshots) |
-| 11 | Six business questions, SQL + result, from both pipelines | ⬜ | [Business questions](#business-questions) |
+| 11 | Six business questions, SQL + result, from both pipelines | ✅ All six answered from both pipelines; results identical | [Business questions](#business-questions) |
 | 12 | No API keys, passwords, webhook URLs or unmasked customer data outside `include/data/` | ✅ Checked on every commit | [.gitignore](.gitignore) |
 
 ## Contents
@@ -273,7 +273,7 @@ The total of both tables equals the DELIVERED net revenue in `etl_fact_orders` (
 
 ## Part B: ELT pipeline
 
-**Status:** ✅ DAG complete (B.1–B.3). B.4 (ETL vs ELT comparison write-up and business questions) in progress.
+**Status:** ✅ complete (B.1–B.4).
 
 **DAG:** [`dags/nammamart_elt_harshpratapsingh.py`](dags/nammamart_elt_harshpratapsingh.py), flow **Extract → Load raw → Transform in the warehouse with SQL**. Same schedule settings as the ETL DAG (see [Part C](#part-c-scheduling)).
 **Helper code:** [`include/nammamart_elt.py`](include/nammamart_elt.py) (file snapshot and header check, and a runner that executes `.sql` files in one transaction with the run's parameters). **SQL:** [`include/sql/`](include/sql/).
@@ -283,7 +283,7 @@ The total of both tables equals the DELIVERED net revenue in `etl_fact_orders` (
 | B.1 Extract + raw layer | ✅ | `extract_customers`, `extract_products`, `extract_stores`, `extract_orders`, `extract_payments` (parallel), `load_raw`, `load_raw_increments` | [`raw/raw_tables.sql`](include/sql/raw/raw_tables.sql), [`raw/load_raw.sql`](include/sql/raw/load_raw.sql), [`raw/load_raw_increments.sql`](include/sql/raw/load_raw_increments.sql) |
 | B.2 Staging layer + data quality in SQL | ✅ | `staging.stg_stores` → `stg_products` → `stg_customers` → `stg_orders` → `stg_payments` (task group, one after another) | [`common/macros.sql`](include/sql/common/macros.sql), [`common/dq_setup.sql`](include/sql/common/dq_setup.sql), [`staging/stg_*.sql`](include/sql/staging/) |
 | B.3 Mart layer + run audit | ✅ | `marts.mart_daily_store_kpis` → `mart_category_margin` → `mart_delivery_sla` → `mart_payment_reconciliation` → `mart_payment_mode_revenue` → `mart_top_customers` (task group), `audit_run` | [`marts/mart_*.sql`](include/sql/marts/) |
-| B.4 ETL vs ELT comparison | ⬜ | | |
+| B.4 ETL vs ELT comparison | ✅ | [`analysis/business_questions.py`](analysis/business_questions.py) | [`analysis/sql/`](analysis/sql/) |
 
 **Extract (B.1).** Each task copies its source file into the run folder (`include/tmp/harshpratapsingh/<run_id>/elt/extract/`) and checks only the header line with Python's `csv` module. Nothing is parsed or cleaned. `extract_orders` also picks up next-day files matching `orders_*_increment.csv`.
 
@@ -351,7 +351,21 @@ Staging tables after a run: `stg_customers` 397 VALID + 3 REJECTED, `stg_product
 
 **Assets.** The DAG publishes 17 tables as Airflow Assets in group `nammamart_elt` (5 raw, 5 staging, `stg_rejected_rows`, 6 marts), so the Assets page shows every ELT table and the task that produces it.
 
-_Step B.4 (ETL vs ELT comparison for September and the six business questions) to be documented when completed._
+**ETL vs ELT for September (B.4).** The brief requires the ELT mart totals to match the ETL totals for September. They match exactly, in the latest run of each DAG:
+
+| September 2026 (delivered orders) | ETL | ELT | Difference |
+|---|---|---|---|
+| Delivered orders | 1,955 | 1,955 | 0 |
+| Net revenue | ₹1,056,219.25 | ₹1,056,219.25 | 0.00 |
+| Gross margin | ₹258,846.51 | ₹258,846.51 | 0.00 |
+| Delivered within 15 minutes | 548 | 548 | 0 |
+| Day × store rows that differ (`etl_daily_zone_revenue` vs `mart_daily_store_kpis`) | 444 | 444 | 0 |
+
+Every zone matches as well (see the [business questions](#business-questions) section, which is generated from the warehouse by [`analysis/business_questions.py`](analysis/business_questions.py) together with the six answers). September excludes the 136 valid new orders dated 1 October from the increment file; both pipelines include them in their all-dates totals (₹1,128,410.45).
+
+**Why they match.** Both pipelines apply the same rules with the same thresholds (taken from `include/nammamart_common.py`), the same duplicate handling (first copy kept), the same "master row must be valid" rule for orders, the same "latest valid version of an order wins" rule for next-day files, and the same formulas (net revenue = `order_amount` of DELIVERED orders; margin rounded per order). Unit tests check that the two pipelines agree check by check, row by row and table by table, so any future change that makes them drift apart fails a test.
+
+**What is different (by design, not in the totals).** ELT loads all 5,372 rows into raw and keeps the 287 rejected rows inside the warehouse (`stg_*` with `dq_status = 'REJECTED'`, and `stg_rejected_rows`), while ETL loads 5,076 rows and writes the 287 rejected rows to quarantine CSV files. In the incremental test ELT's MERGE updated 10 orders and ETL's updated 9: the tenth correction belongs to a rejected order, which ELT keeps (flagged) and ETL does not hold at all.
 
 ---
 
@@ -420,25 +434,456 @@ The ELT pipeline implements **the same checks in SQL**: same names, dimensions, 
 
 ## Business questions
 
-Each question is answered with one query on the final tables of **both** pipelines.
+Each question is answered with **one query on the final tables of each pipeline**: the ETL star schema and report tables (`etl_*`), and the ELT marts (`mart_*`, `stg_rejected_rows`). For every question the script runs both queries and checks that they return the same rows; open **SQL** under each question to see both queries.
+
+To refresh this section after a new run (with no DAG running): `python analysis/business_questions.py --update-submission`.
+
+<!-- business-questions:start -->
+
+Results below are from the latest successful run of each DAG: `nammamart_elt_harshpratapsingh` run `manual__2026-10-20T11:52:44.250688+00:00`; `nammamart_etl_harshpratapsingh` run `manual__2026-10-20T10:10:27.361804+00:00`. Generated by [`analysis/business_questions.py`](analysis/business_questions.py) from the SQL in [`analysis/sql/`](analysis/sql/).
 
 ### Q1. Daily net revenue by zone and by store (delivered orders only, after discount)
-_ETL: SQL + result. ELT: SQL + result. To be completed._
+
+✅ ETL and ELT return **identical** results.
+
+<details><summary>SQL</summary>
+
+**ETL** ([`analysis/sql/q1_etl.sql`](analysis/sql/q1_etl.sql))
+
+```sql
+-- Q1 (ETL): daily net revenue by zone and by store (delivered orders only, after discount).
+SELECT order_date, zone, store_id, store_name, delivered_orders, net_revenue
+FROM etl_daily_zone_revenue
+ORDER BY order_date, zone, store_id;
+```
+
+**ELT** ([`analysis/sql/q1_elt.sql`](analysis/sql/q1_elt.sql))
+
+```sql
+-- Q1 (ELT): daily net revenue by zone and by store (delivered orders only, after discount).
+SELECT order_date, zone, store_id, store_name, delivered_orders, net_revenue
+FROM mart_daily_store_kpis
+ORDER BY order_date, zone, store_id;
+```
+
+</details>
+
+**Result (ETL and ELT):**
+
+| order_date | zone | store_id | store_name | delivered_orders | net_revenue |
+|---|---|---|---|---|---|
+| 2026-09-01 | East | S08 | NammaMart Whitefield | 4 | 2,984.70 |
+| 2026-09-01 | East | S09 | NammaMart Indiranagar | 4 | 2,089.60 |
+| 2026-09-01 | East | S10 | NammaMart Marathahalli | 3 | 2,141.60 |
+| 2026-09-01 | East | S11 | NammaMart HSR Layout | 6 | 2,121.15 |
+| 2026-09-01 | North | S01 | NammaMart Hebbal | 3 | 1,410.80 |
+| 2026-09-01 | North | S02 | NammaMart Yelahanka | 6 | 2,385.55 |
+| 2026-09-01 | North | S03 | NammaMart RT Nagar | 6 | 4,583.80 |
+| 2026-09-01 | South | S05 | NammaMart JP Nagar | 2 | 803.00 |
+| 2026-09-01 | South | S06 | NammaMart Banashankari | 6 | 2,812.00 |
+| 2026-09-01 | Unknown | S07 | NammaMart BTM Layout | 9 | 5,844.75 |
+
+_First 10 of 459 rows._
 
 ### Q2. Revenue and gross margin by product category (margin = revenue − quantity × cost_price)
-_To be completed._
+
+✅ ETL and ELT return **identical** results.
+
+<details><summary>SQL</summary>
+
+**ETL** ([`analysis/sql/q2_etl.sql`](analysis/sql/q2_etl.sql))
+
+```sql
+-- Q2 (ETL): revenue and gross margin by product category (margin = revenue - quantity x cost_price).
+SELECT category, delivered_orders, revenue, cost, gross_margin, margin_pct
+FROM etl_category_margin
+ORDER BY revenue DESC;
+```
+
+**ELT** ([`analysis/sql/q2_elt.sql`](analysis/sql/q2_elt.sql))
+
+```sql
+-- Q2 (ELT): revenue and gross margin by product category (margin = revenue - quantity x cost_price).
+SELECT category, delivered_orders, revenue, cost, gross_margin, margin_pct
+FROM mart_category_margin
+ORDER BY revenue DESC;
+```
+
+</details>
+
+**Result (ETL and ELT):**
+
+| category | delivered_orders | revenue | cost | gross_margin | margin_pct |
+|---|---|---|---|---|---|
+| Staples | 300 | 264,456.90 | 198,021.62 | 66,435.28 | 25.12 |
+| Household | 359 | 210,229.95 | 156,174.68 | 54,055.27 | 25.71 |
+| Personal Care | 319 | 208,774.70 | 162,065.13 | 46,709.57 | 22.37 |
+| Dairy & Bakery | 402 | 177,404.85 | 130,204.03 | 47,200.82 | 26.61 |
+| Snacks & Beverages | 339 | 174,575.60 | 133,236.36 | 41,339.24 | 23.68 |
+| Fruits & Vegetables | 372 | 92,968.45 | 70,950.23 | 22,018.22 | 23.68 |
 
 ### Q3. Average delivery time per store, and the % of delivered orders within 15 minutes
-_To be completed._
+
+✅ ETL and ELT return **identical** results.
+
+<details><summary>SQL</summary>
+
+**ETL** ([`analysis/sql/q3_etl.sql`](analysis/sql/q3_etl.sql))
+
+```sql
+-- Q3 (ETL): average delivery time per store, and the % of delivered orders within 15 minutes.
+SELECT s.zone, f.store_id, s.store_name,
+       count(*)                                                              AS delivered_orders,
+       round(avg(f.delivery_minutes), 1)                                     AS avg_delivery_minutes,
+       round(100.0 * count(*) FILTER (WHERE f.within_15_min) / count(*), 1)  AS pct_within_15_min
+FROM etl_fact_orders AS f
+JOIN etl_dim_store AS s USING (store_id)
+WHERE f.order_status = 'DELIVERED'
+GROUP BY ALL
+ORDER BY s.zone, f.store_id;
+```
+
+**ELT** ([`analysis/sql/q3_elt.sql`](analysis/sql/q3_elt.sql))
+
+```sql
+-- Q3 (ELT): average delivery time per store, and the % of delivered orders within 15 minutes.
+SELECT zone, store_id, store_name, delivered_orders, avg_delivery_minutes, pct_within_15_min
+FROM mart_delivery_sla
+ORDER BY zone, store_id;
+```
+
+</details>
+
+**Result (ETL and ELT):**
+
+| zone | store_id | store_name | delivered_orders | avg_delivery_minutes | pct_within_15_min |
+|---|---|---|---|---|---|
+| East | S08 | NammaMart Whitefield | 155 | 20.60 | 35.50 |
+| East | S09 | NammaMart Indiranagar | 127 | 21.10 | 27.60 |
+| East | S10 | NammaMart Marathahalli | 141 | 21.90 | 27.00 |
+| East | S11 | NammaMart HSR Layout | 144 | 21.00 | 27.80 |
+| North | S01 | NammaMart Hebbal | 141 | 20.60 | 31.20 |
+| North | S02 | NammaMart Yelahanka | 139 | 21.00 | 30.90 |
+| North | S03 | NammaMart RT Nagar | 137 | 20.70 | 29.20 |
+| South | S04 | NammaMart Jayanagar | 130 | 21.60 | 26.90 |
+| South | S05 | NammaMart JP Nagar | 134 | 21.20 | 29.10 |
+| South | S06 | NammaMart Banashankari | 145 | 22.30 | 22.10 |
+| Unknown | S07 | NammaMart BTM Layout | 143 | 21.10 | 33.60 |
+| West | S12 | NammaMart Rajajinagar | 113 | 22.00 | 23.90 |
+| West | S13 | NammaMart Malleshwaram | 137 | 21.80 | 27.00 |
+| West | S14 | NammaMart Vijayanagar | 162 | 21.50 | 31.50 |
+| West | S15 | NammaMart Basaveshwaranagar | 143 | 22.30 | 21.00 |
 
 ### Q4. Revenue by payment mode, and the total amount that doesn't reconcile with the payment gateway
-_To be completed._
+
+✅ ETL and ELT return **identical** results.
+
+<details><summary>SQL</summary>
+
+**ETL** ([`analysis/sql/q4_etl.sql`](analysis/sql/q4_etl.sql))
+
+```sql
+-- Q4 (ETL): revenue by payment mode, and the amount that does not reconcile with the payment gateway.
+-- A mismatch is assigned to the order's payment mode, or to the gateway's when there is no valid order.
+WITH revenue AS (
+    SELECT payment_mode, count(*) AS delivered_orders, sum(net_revenue) AS net_revenue
+    FROM etl_fact_orders
+    WHERE order_status = 'DELIVERED'
+    GROUP BY payment_mode
+),
+not_reconciled AS (
+    SELECT coalesce(order_payment_mode, gateway_payment_mode) AS payment_mode,
+           count(*) AS mismatches, sum(amount_at_risk) AS amount_not_reconciled
+    FROM etl_payment_reconciliation
+    GROUP BY 1
+),
+per_mode AS (
+    SELECT coalesce(r.payment_mode, n.payment_mode) AS payment_mode,
+           coalesce(r.delivered_orders, 0) AS delivered_orders, coalesce(r.net_revenue, 0) AS net_revenue,
+           coalesce(n.mismatches, 0) AS mismatches, coalesce(n.amount_not_reconciled, 0) AS amount_not_reconciled
+    FROM revenue AS r FULL OUTER JOIN not_reconciled AS n USING (payment_mode)
+)
+SELECT coalesce(payment_mode, 'TOTAL') AS payment_mode, CAST(sum(delivered_orders) AS BIGINT) AS delivered_orders,
+       round(sum(net_revenue), 2) AS net_revenue, CAST(sum(mismatches) AS BIGINT) AS mismatches,
+       round(sum(amount_not_reconciled), 2) AS amount_not_reconciled
+FROM per_mode
+GROUP BY ROLLUP (payment_mode)
+ORDER BY payment_mode IS NULL, net_revenue DESC;
+```
+
+**ELT** ([`analysis/sql/q4_elt.sql`](analysis/sql/q4_elt.sql))
+
+```sql
+-- Q4 (ELT): revenue by payment mode, and the amount that does not reconcile with the payment gateway.
+SELECT coalesce(payment_mode, 'TOTAL') AS payment_mode, CAST(sum(delivered_orders) AS BIGINT) AS delivered_orders,
+       round(sum(net_revenue), 2) AS net_revenue, CAST(sum(mismatches) AS BIGINT) AS mismatches,
+       round(sum(amount_not_reconciled), 2) AS amount_not_reconciled
+FROM mart_payment_mode_revenue
+GROUP BY ROLLUP (payment_mode)
+ORDER BY payment_mode IS NULL, net_revenue DESC;
+```
+
+</details>
+
+**Result (ETL and ELT):**
+
+| payment_mode | delivered_orders | net_revenue | mismatches | amount_not_reconciled |
+|---|---|---|---|---|
+| UPI | 1,131 | 598,618.20 | 208 | 127,400.55 |
+| Card | 428 | 231,787.85 | 100 | 55,502.60 |
+| Cash on Delivery | 298 | 169,026.60 | 70 | 63,143.05 |
+| Wallet | 234 | 128,977.80 | 55 | 30,882.30 |
+| TOTAL | 2,091 | 1,128,410.45 | 433 | 276,928.50 |
 
 ### Q5. Top 10 customers by spend, with loyalty tier (no raw email or phone shown)
-_To be completed._
+
+✅ ETL and ELT return **identical** results.
+
+<details><summary>SQL</summary>
+
+**ETL** ([`analysis/sql/q5_etl.sql`](analysis/sql/q5_etl.sql))
+
+```sql
+-- Q5 (ETL): top 10 customers by spend, with loyalty tier. Only the masked name is shown (no email or phone).
+SELECT row_number() OVER (ORDER BY sum(f.net_revenue) DESC, f.customer_id) AS spend_rank,
+       f.customer_id, c.name_masked, c.loyalty_tier,
+       count(*) AS delivered_orders, round(sum(f.net_revenue), 2) AS total_spend
+FROM etl_fact_orders AS f
+JOIN etl_dim_customer AS c USING (customer_id)
+WHERE f.order_status = 'DELIVERED'
+GROUP BY f.customer_id, c.name_masked, c.loyalty_tier
+ORDER BY spend_rank
+LIMIT 10;
+```
+
+**ELT** ([`analysis/sql/q5_elt.sql`](analysis/sql/q5_elt.sql))
+
+```sql
+-- Q5 (ELT): top 10 customers by spend, with loyalty tier. Only the masked name is shown (no email or phone).
+SELECT spend_rank, customer_id, name_masked, loyalty_tier, delivered_orders, total_spend
+FROM mart_top_customers
+WHERE spend_rank <= 10
+ORDER BY spend_rank;
+```
+
+</details>
+
+**Result (ETL and ELT):**
+
+| spend_rank | customer_id | name_masked | loyalty_tier | delivered_orders | total_spend |
+|---|---|---|---|---|---|
+| 1 | C00136 | S*** B*** | Bronze | 9 | 8,738.10 |
+| 2 | C00236 | S*** N*** | Platinum | 12 | 7,831.80 |
+| 3 | C00115 | S*** K*** | Bronze | 7 | 7,337.70 |
+| 4 | C00310 | K*** P*** | Bronze | 8 | 7,258.95 |
+| 5 | C00265 | V*** H*** | Gold | 8 | 7,151.30 |
+| 6 | C00338 | B*** I*** | Silver | 9 | 6,848.55 |
+| 7 | C00283 | N*** R*** | Bronze | 7 | 6,766.40 |
+| 8 | C00357 | A*** N*** | Bronze | 11 | 6,637.90 |
+| 9 | C00209 | K*** P*** | Platinum | 8 | 6,519.40 |
+| 10 | C00072 | N*** M*** | Silver | 11 | 6,433.95 |
 
 ### Q6. Number of rows rejected today, by file and by reason
-_To be completed._
+
+✅ ETL and ELT return **identical** results.
+
+<details><summary>SQL</summary>
+
+**ETL** ([`analysis/sql/q6_etl.sql`](analysis/sql/q6_etl.sql))
+
+```sql
+-- Q6 (ETL): rows rejected in the latest successful ETL run, by file and by reason.
+-- The ETL pipeline keeps rejected rows in quarantine CSV files, so this query reads those files
+-- (getvariable('quarantine_glob') = include/quarantine/harshpratapsingh/*_failed_*.csv).
+-- "(all reasons)" is the number of rejected rows; a row that broke two rules also counts once under each reason.
+WITH latest AS (
+    SELECT trim(regexp_replace(run_id, '[^A-Za-z0-9_-]+', '_', 'g'), '_') AS file_run_id
+    FROM pipeline_runs
+    WHERE dag_id = 'nammamart_etl_harshpratapsingh' AND status = 'SUCCESS'
+    ORDER BY start_time DESC
+    LIMIT 1
+),
+rejected AS (
+    SELECT q.source_file, q.failure_reason
+    FROM read_csv(getvariable('quarantine_glob'), union_by_name = true, all_varchar = true, filename = true) AS q
+    CROSS JOIN latest
+    WHERE parse_filename(q.filename) = regexp_replace(q.source_file, '\.csv$', '') || '_failed_' || latest.file_run_id || '.csv'
+),
+by_reason AS (
+    SELECT source_file, unnest(string_split(failure_reason, '; ')) AS reason FROM rejected
+)
+SELECT * FROM (
+    SELECT source_file, '(all reasons)' AS reason, count(*) AS rows_rejected FROM rejected GROUP BY ALL
+    UNION ALL
+    SELECT source_file, reason, count(*) FROM by_reason GROUP BY ALL
+)
+ORDER BY source_file, reason <> '(all reasons)', rows_rejected DESC, reason;
+```
+
+**ELT** ([`analysis/sql/q6_elt.sql`](analysis/sql/q6_elt.sql))
+
+```sql
+-- Q6 (ELT): rows rejected in the latest successful ELT run, by file and by reason (from stg_rejected_rows).
+-- "(all reasons)" is the number of rejected rows; a row that broke two rules also counts once under each reason.
+WITH latest AS (
+    SELECT run_id
+    FROM pipeline_runs
+    WHERE dag_id = 'nammamart_elt_harshpratapsingh' AND status = 'SUCCESS'
+    ORDER BY start_time DESC
+    LIMIT 1
+),
+rejected AS (
+    SELECT r.source_file, r.failure_reason
+    FROM stg_rejected_rows AS r JOIN latest ON r._run_id = latest.run_id
+),
+by_reason AS (
+    SELECT source_file, unnest(string_split(failure_reason, '; ')) AS reason FROM rejected
+)
+SELECT * FROM (
+    SELECT source_file, '(all reasons)' AS reason, count(*) AS rows_rejected FROM rejected GROUP BY ALL
+    UNION ALL
+    SELECT source_file, reason, count(*) FROM by_reason GROUP BY ALL
+)
+ORDER BY source_file, reason <> '(all reasons)', rows_rejected DESC, reason;
+```
+
+</details>
+
+**Result (ETL and ELT):**
+
+| source_file | reason | rows_rejected |
+|---|---|---|
+| customers.csv | (all reasons) | 8 |
+| customers.csv | duplicate customer_id (copy of an earlier row) | 5 |
+| customers.csv | signup_date is in the future | 3 |
+| orders.csv | (all reasons) | 235 |
+| orders.csv | product_id points to a quarantined products row | 126 |
+| orders.csv | customer_id is missing | 18 |
+| orders.csv | customer_id points to a quarantined customers row | 18 |
+| orders.csv | order_amount != quantity x unit_price x (1 - discount_pct/100) | 18 |
+| orders.csv | duplicate order_id (copy of an earlier row) | 12 |
+| orders.csv | quantity is zero or negative | 10 |
+| orders.csv | product_id not found in products | 9 |
+| orders.csv | DELIVERED order has no delivery_minutes | 8 |
+| orders.csv | order_ts is in the future | 7 |
+| orders.csv | delivery_minutes above 120 | 6 |
+| orders.csv | order_amount is negative | 6 |
+| orders.csv | store_id not found in stores | 5 |
+| orders.csv | order_ts is not a valid YYYY-MM-DD HH:MM:SS timestamp | 4 |
+| orders.csv | discount_pct outside 0-100 | 3 |
+| orders.csv | order_status is not DELIVERED/CANCELLED/RETURNED | 3 |
+| orders.csv | order_ts is missing | 2 |
+| orders.csv | payment_mode is not a known mode | 2 |
+| orders_2026-10-01_increment.csv | (all reasons) | 15 |
+| orders_2026-10-01_increment.csv | product_id points to a quarantined products row | 14 |
+| orders_2026-10-01_increment.csv | customer_id points to a quarantined customers row | 1 |
+| payments.csv | (all reasons) | 19 |
+| payments.csv | payment_ts is in the future | 7 |
+| payments.csv | amount_paid is negative | 6 |
+| payments.csv | duplicate payment_id (copy of an earlier row) | 4 |
+| payments.csv | payment_mode is not a known mode | 2 |
+| products.csv | (all reasons) | 10 |
+| products.csv | cost_price is greater than mrp | 5 |
+| products.csv | category is missing | 3 |
+| products.csv | duplicate product_id (copy of an earlier row) | 2 |
+| products.csv | mrp is zero or negative | 1 |
+
+### ETL vs ELT totals for September 2026 (Part B4)
+
+<details><summary>SQL</summary>
+
+```sql
+-- Part B4: ELT mart totals vs ETL totals for September 2026 (delivered orders, order_date 1-30 September).
+-- Values are formatted as text so counts and rupee amounts can share one table.
+WITH etl AS (
+    SELECT count(*) AS delivered_orders, sum(net_revenue) AS net_revenue, sum(gross_margin) AS gross_margin,
+           count(*) FILTER (WHERE within_15_min) AS within_15_min
+    FROM etl_fact_orders
+    WHERE order_status = 'DELIVERED' AND order_date BETWEEN DATE '2026-09-01' AND DATE '2026-09-30'
+),
+elt AS (
+    SELECT CAST(sum(delivered_orders) AS BIGINT) AS delivered_orders, sum(net_revenue) AS net_revenue,
+           sum(gross_margin) AS gross_margin, CAST(sum(orders_within_15_min) AS BIGINT) AS within_15_min
+    FROM mart_daily_store_kpis
+    WHERE order_date BETWEEN DATE '2026-09-01' AND DATE '2026-09-30'
+),
+day_store_diff AS (
+    SELECT count(*) AS n FROM (
+        (SELECT order_date, store_id, delivered_orders, net_revenue FROM etl_daily_zone_revenue
+         WHERE order_date BETWEEN DATE '2026-09-01' AND DATE '2026-09-30'
+         EXCEPT
+         SELECT order_date, store_id, delivered_orders, net_revenue FROM mart_daily_store_kpis
+         WHERE order_date BETWEEN DATE '2026-09-01' AND DATE '2026-09-30')
+        UNION ALL
+        (SELECT order_date, store_id, delivered_orders, net_revenue FROM mart_daily_store_kpis
+         WHERE order_date BETWEEN DATE '2026-09-01' AND DATE '2026-09-30'
+         EXCEPT
+         SELECT order_date, store_id, delivered_orders, net_revenue FROM etl_daily_zone_revenue
+         WHERE order_date BETWEEN DATE '2026-09-01' AND DATE '2026-09-30'))
+)
+SELECT 'Delivered orders' AS metric, format('{:,}', etl.delivered_orders) AS etl,
+       format('{:,}', elt.delivered_orders) AS elt, format('{:,}', elt.delivered_orders - etl.delivered_orders) AS difference
+FROM etl, elt
+UNION ALL
+SELECT 'Net revenue (₹)', format('{:,.2f}', etl.net_revenue), format('{:,.2f}', elt.net_revenue),
+       format('{:,.2f}', round(elt.net_revenue - etl.net_revenue, 2) + 0.0)
+FROM etl, elt
+UNION ALL
+SELECT 'Gross margin (₹)', format('{:,.2f}', etl.gross_margin), format('{:,.2f}', elt.gross_margin),
+       format('{:,.2f}', round(elt.gross_margin - etl.gross_margin, 2) + 0.0)
+FROM etl, elt
+UNION ALL
+SELECT 'Delivered within 15 minutes', format('{:,}', etl.within_15_min), format('{:,}', elt.within_15_min),
+       format('{:,}', elt.within_15_min - etl.within_15_min)
+FROM etl, elt
+UNION ALL
+SELECT 'Day × store rows that differ (ETL report vs ELT mart)', format('{:,}', n), format('{:,}', n), '0'
+FROM day_store_diff;
+```
+
+```sql
+-- Part B4: September 2026 net revenue by zone, ETL report table vs ELT mart.
+WITH etl AS (
+    SELECT zone, sum(delivered_orders) AS orders, sum(net_revenue) AS revenue
+    FROM etl_daily_zone_revenue
+    WHERE order_date BETWEEN DATE '2026-09-01' AND DATE '2026-09-30'
+    GROUP BY zone
+),
+elt AS (
+    SELECT zone, sum(delivered_orders) AS orders, sum(net_revenue) AS revenue
+    FROM mart_daily_store_kpis
+    WHERE order_date BETWEEN DATE '2026-09-01' AND DATE '2026-09-30'
+    GROUP BY zone
+)
+SELECT coalesce(zone, 'TOTAL') AS zone,
+       CAST(sum(etl.orders) AS BIGINT) AS etl_orders, CAST(sum(elt.orders) AS BIGINT) AS elt_orders,
+       round(sum(etl.revenue), 2) AS etl_net_revenue, round(sum(elt.revenue), 2) AS elt_net_revenue,
+       round(sum(elt.revenue) - sum(etl.revenue), 2) + 0.0 AS difference
+FROM etl FULL OUTER JOIN elt USING (zone)
+GROUP BY ROLLUP (zone)
+ORDER BY zone IS NULL, etl_net_revenue DESC;
+```
+
+</details>
+
+| metric | etl | elt | difference |
+|---|---|---|---|
+| Delivered orders | 1,955 | 1,955 | 0 |
+| Net revenue (₹) | 1,056,219.25 | 1,056,219.25 | 0.00 |
+| Gross margin (₹) | 258,846.51 | 258,846.51 | 0.00 |
+| Delivered within 15 minutes | 548 | 548 | 0 |
+| Day × store rows that differ (ETL report vs ELT mart) | 0 | 0 | 0 |
+
+| zone | etl_orders | elt_orders | etl_net_revenue | elt_net_revenue | difference |
+|---|---|---|---|---|---|
+| East | 517 | 517 | 271,139.95 | 271,139.95 | 0.00 |
+| West | 522 | 522 | 270,322.30 | 270,322.30 | 0.00 |
+| South | 387 | 387 | 225,606.30 | 225,606.30 | 0.00 |
+| North | 391 | 391 | 215,332.65 | 215,332.65 | 0.00 |
+| Unknown | 138 | 138 | 73,818.05 | 73,818.05 | 0.00 |
+| TOTAL | 1,955 | 1,955 | 1,056,219.25 | 1,056,219.25 | 0.00 |
+
+<!-- business-questions:end -->
 
 ---
 

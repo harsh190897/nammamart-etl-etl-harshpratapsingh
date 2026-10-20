@@ -401,3 +401,17 @@ def test_marts_are_rebuilt_not_appended(marts_and_etl):
     before = {m: con.execute(f"SELECT count(*) FROM {m}").fetchone()[0] for m in MARTS}
     run_marts(con)
     assert {m: con.execute(f"SELECT count(*) FROM {m}").fetchone()[0] for m in MARTS} == before
+
+
+# ── Business questions (Part B.4) ─────────────────────────────────────────────────────
+@pytest.mark.parametrize("question", ["q1", "q2", "q3", "q4", "q5"])
+def test_business_question_sql_gives_the_same_answer_in_both_pipelines(marts_and_etl, question):
+    """analysis/sql/<q>_etl.sql and <q>_elt.sql must return identical rows (Q6 also needs the quarantine
+    files and pipeline_runs of a real run, so it is checked by analysis/business_questions.py)."""
+    folder = Path(__file__).resolve().parent.parent / "analysis" / "sql"
+    if not folder.exists():   # the running Airflow containers only mount dags/, include/, plugins/ and tests/
+        pytest.skip("analysis/sql is not available here (run locally or with `astro dev pytest`)")
+    etl = marts_and_etl.execute((folder / f"{question}_etl.sql").read_text()).df()
+    elt = marts_and_etl.execute((folder / f"{question}_elt.sql").read_text()).df()
+    assert len(etl) > 0
+    pd.testing.assert_frame_equal(etl, elt, check_dtype=False, check_exact=False, atol=0.005)

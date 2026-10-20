@@ -174,3 +174,16 @@ def test_run_dir_is_created_per_run(tmp_path, monkeypatch):
 def test_is_missing_treats_placeholders_as_blank():
     values = pd.Series(["", "  ", "N/A", "null", "-", None, "C00001", "0"])
     assert nc.is_missing(values).tolist() == [True, True, True, True, True, True, False, False]
+
+
+# ── Parquet helpers (Part A.3) ────────────────────────────────────────
+def test_parquet_round_trip_keeps_types(tmp_path):
+    df = pd.DataFrame({"id": ["A", "B"], "amount": [1.5, None],
+                       "flag": pd.array([True, None], dtype="boolean"),
+                       "ts": pd.to_datetime(["2026-09-01 10:00:00", None])})
+    back = nc.read_parquet(nc.write_parquet(df, tmp_path / "x" / "t.parquet"))
+    assert back["id"].tolist() == ["A", "B"]
+    assert back["amount"].iloc[0] == 1.5 and pd.isna(back["amount"].iloc[1])
+    assert back["flag"].iloc[0] == True and pd.isna(back["flag"].iloc[1])  # noqa: E712
+    assert back["ts"].iloc[0] == pd.Timestamp("2026-09-01 10:00:00") and pd.isna(back["ts"].iloc[1])
+

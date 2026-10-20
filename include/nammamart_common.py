@@ -153,6 +153,31 @@ def check_columns(df: pd.DataFrame, expected: list, file_name: str) -> None:
         raise ValueError(f"Schema change in {file_name}: missing columns {missing}, unexpected columns {extra}")
 
 
+def _sql_literal(path) -> str:
+    return "'" + str(path).replace("'", "''") + "'"
+
+
+def write_parquet(df: pd.DataFrame, path) -> Path:
+    """Save a typed DataFrame as Parquet using DuckDB (the Airflow image has no pyarrow)."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    con = duckdb.connect()
+    try:
+        con.register("df_to_write", df)
+        con.execute(f"COPY df_to_write TO {_sql_literal(path)} (FORMAT parquet)")
+    finally:
+        con.close()
+    return path
+
+
+def read_parquet(path) -> pd.DataFrame:
+    con = duckdb.connect()
+    try:
+        return con.execute(f"SELECT * FROM read_parquet({_sql_literal(path)})").df()
+    finally:
+        con.close()
+
+
 # ─────────────────────────── 4. DuckDB connection ───────────────────────────
 @contextmanager
 def get_connection(db_path=WAREHOUSE_DB, retries: int = 10, wait_seconds: float = 3):

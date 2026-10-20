@@ -1,4 +1,4 @@
-"""Unit tests for the ETL data quality rules (no Airflow needed).
+"""Unit tests for the ETL helper modules: quality rules, transform and load (no Airflow needed).
 
 Run locally from the project root:   pytest tests/test_nammamart_etl.py -v
 Run inside Astro (Docker):           astro dev pytest tests/test_nammamart_etl.py
@@ -14,6 +14,8 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "include"))
 import nammamart_common as nc  # noqa: E402
 import nammamart_etl_checks as ck  # noqa: E402
+import nammamart_etl_load as ld  # noqa: E402
+import nammamart_etl_transform as tf  # noqa: E402
 
 AS_OF = pd.Timestamp("2026-10-20 09:00")
 
@@ -106,3 +108,69 @@ def test_volume_check():
     assert ck.volume_check("x", 50, 2412)["rows_failed"] == 1
     assert ck.volume_check("x", 2412, 2412)["rows_failed"] == 0
     assert ck.volume_check("x", 2412, None)["rows_failed"] == 0
+
+
+# ── Transform ─────────────────────────────────────────────────────────────────────────
+@pytest.fixture(scope="module")
+def tables(validated):
+    dim_product = tf.build_dim_product(validated["products"].passed)
+    return {
+        "etl_dim_customer": tf.build_dim_customer(validated["customers"].passed),
+        "etl_dim_product": dim_product,
+        "etl_dim_store": tf.build_dim_store(validated["stores"].passed),
+        "etl_fact_orders": tf.build_fact_orders([validated["orders"].passed, validated["increment"].passed],
+                                                dim_product),
+        "etl_fact_payments": tf.build_payments(validated["payments"].passed),
+    }
+
+
+def test_customer_pii_is_masked(tables):
+    dim = tables["etl_dim_customer"]
+    assert not {"email", "phone", "full_name"} & set(dim.columns)
+    assert dim["phone_masked"].str.fullmatch(r"\d{2}\*+\d{2}").all()
+    # valid emails keep 1-2 characters + domain; invalid ones (no '@') are fully hidden as '***'
+    assert dim["email_masked"].dropna().str.fullmatch(r".{1,2}\*\*\*@.+|\*\*\*").all()
+    assert dim["loyalty_tier"].isin(nc.LOYALTY_TIERS).all()
+
+
+def test_fact_orders(tables):
+    fact = tables["etl_fact_orders"]
+    assert fact["order_id"].is_unique
+    assert set(fact["payment_mode"]) <= set(nc.VALID_PAYMENT_MODES)
+    assert (fact.loc[fact["order_status"] != "DELIVERED", "net_revenue"] == 0).all()
+    corrected = fact.set_index("order_id").loc["ORD000017"]       # DELIVERED in orders.csv, RETURNED next day
+    assert corrected["order_status"] == "RETURNED" and corrected["net_revenue"] == 0
+    assert corrected["source_file"] == nc.INCREMENT_FILE
+
+
+def test_unknown_zone(tables):
+    assert tables["etl_dim_store"].set_index("store_id").loc["S07", "zone"] == nc.UNKNOWN
+
+
+# ── Load ───────────────────────────────────────────────────────────
+def test_load_is_idempotent(tables, tmp_path):
+    paths = {name: nc.write_parquet(df, tmp_path / f"{name}.parquet") for name, df in tables.items()}
+    with nc.get_connection(tmp_path / "wh.duckdb") as con:
+        first = ld.load_star_schema(con, paths, "run_1")
+        second = ld.load_star_schema(con, paths, "run_2")
+        masked = con.execute("SELECT count(*) FROM etl_dim_customer WHERE email_masked LIKE '%@%' "
+                             "AND email_masked NOT LIKE '%***@%'").fetchone()[0]
+
+    assert first["fact_inserted"] == len(tables["etl_fact_orders"])
+    assert (second["fact_inserted"], second["fact_updated"]) == (0, 0)
+    assert second["etl_fact_orders"] == first["etl_fact_orders"]
+    assert masked == 0
+
+
+def test_increment_updates_without_duplicates(validated, tables, tmp_path):
+    dim_product = tables["etl_dim_product"]
+    day1 = dict(tables, etl_fact_orders=tf.build_fact_orders([validated["orders"].passed], dim_product))
+    day1_paths = {n: nc.write_parquet(df, tmp_path / f"d1_{n}.parquet") for n, df in day1.items()}
+    day2_paths = {n: nc.write_parquet(df, tmp_path / f"d2_{n}.parquet") for n, df in tables.items()}
+    with nc.get_connection(tmp_path / "wh.duckdb") as con:
+        ld.load_star_schema(con, day1_paths, "day_1")
+        day2 = ld.load_star_schema(con, day2_paths, "day_2")
+    new_orders = len(tables["etl_fact_orders"]) - len(day1["etl_fact_orders"])
+    assert day2["fact_inserted"] == new_orders
+    assert day2["fact_updated"] == 9            # 10 corrections, one is quarantined (quarantined product)
+    assert day2["etl_fact_orders"] == len(tables["etl_fact_orders"])

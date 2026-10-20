@@ -4,28 +4,40 @@ dags/nammamart_etl_harshpratapsingh.py
 NammaMart ETL pipeline (Part A): Extract -> Validate -> Transform -> Load.
 Only rows that pass every Critical check reach the finance tables; failed rows are quarantined with a reason.
 
-Graph so far (A.1 + A.2):
+Graph so far (A.1 - A.3):
   extract_customers -> validate_customers --+
-  extract_products  -> validate_products  --+--> validate_orders --+
-  extract_stores    -> validate_stores    --+          ^           +--> quarantine_and_log_dq
-  extract_orders    -----------------------------------+           |
+  extract_products  -> validate_products  --+--> validate_orders --+--> quarantine_and_log_dq --+
+  extract_stores    -> validate_stores    --+          ^           |                            +--> load
+  extract_orders    -----------------------------------+           +--> transform --------------+
   extract_payments  -> validate_payments (also uses extract_orders) -+
+
+`load` publishes the warehouse tables as Airflow Assets (see the Assets page in the UI).
 
 Helper code lives in include/:
   nammamart_common.py           paths, constants, DuckDB connection, masking, audit tables
   nammamart_etl_checks.py       data quality rules (pandas)
+  nammamart_etl_transform.py    standardise, mask, join, derive (pandas)
+  nammamart_etl_load.py         star schema load (DuckDB SQL)
 """
 import sys
 from datetime import timedelta
 from pathlib import Path
 
 import pendulum
-from airflow.sdk import dag, get_current_context, task
+from airflow.sdk import Asset, dag, get_current_context, task
 
 # Make include/ importable (same idea as meridian_pipeline.py, but works from any project path)
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "include"))
 
 DAG_ID = "nammamart_etl_harshpratapsingh"
+
+# Warehouse tables written by the `load` task. Declaring them as Assets makes Airflow record an
+# asset event every time `load` succeeds, and shows the tables and their producer on the Assets page.
+STAR_SCHEMA_TABLES = ["etl_dim_customer", "etl_dim_product", "etl_dim_store", "etl_fact_orders", "etl_fact_payments"]
+STAR_SCHEMA_ASSETS = [
+    Asset(name=table, uri=f"duckdb://warehouse_harshpratapsingh/{table}", group="nammamart_etl")
+    for table in STAR_SCHEMA_TABLES
+]
 
 default_args = {
     "owner": "harshpratapsingh",
@@ -83,6 +95,11 @@ def _validate_master(extracted: dict, key: str, rules) -> dict:
     valid = nc.read_text_csv(saved["passed_path"])
     return {"entity": extracted["entity"], "files": [saved],
             "all_ids": sorted(set(df[key].str.strip())), "valid_ids": sorted(set(valid[key].str.strip()))}
+
+
+def _passed_rows(validated: dict):
+    import nammamart_common as nc
+    return [nc.read_text_csv(f["passed_path"]) for f in validated["files"]]
 
 
 @dag(
@@ -197,6 +214,42 @@ def nammamart_etl_harshpratapsingh():
         print(f"[DQ] {written} checks written to dq_results ({failed_checks} with failures)")
         return {"quarantined": sum(quarantined.values()), "by_file": quarantined, "files": files_written}
 
+    # ── 4. TRANSFORM (pandas): standardise, dedupe, mask PII, join, derive ─────────────────
+    @task
+    def transform(customers: dict, products: dict, stores: dict, orders: dict, payments: dict):
+        import nammamart_common as nc
+        import nammamart_etl_transform as tf
+
+        dim_product = tf.build_dim_product(_passed_rows(products)[0])
+        tables = {
+            "etl_dim_customer": tf.build_dim_customer(_passed_rows(customers)[0]),
+            "etl_dim_product": dim_product,
+            "etl_dim_store": tf.build_dim_store(_passed_rows(stores)[0]),
+            "etl_fact_orders": tf.build_fact_orders(_passed_rows(orders), dim_product),
+            "etl_fact_payments": tf.build_payments(_passed_rows(payments)[0]),
+        }
+        folder = nc.run_dir(_run_id(), "transform")
+        paths = {}
+        for name, df in tables.items():
+            paths[name] = str(nc.write_parquet(df, folder / f"{name}.parquet"))
+            print(f"[Transform] {name}: {len(df)} rows")
+        return paths
+
+    # ── 5. LOAD into DuckDB (idempotent) ──────────────────────────────────────────────────
+    @task(outlets=STAR_SCHEMA_ASSETS)
+    def load(parquet_paths: dict, quarantine_result: dict):
+        # quarantine_result is not used: it makes load wait until dq_results is written,
+        # so only one task writes to the warehouse file at a time.
+        import nammamart_common as nc
+        from nammamart_etl_load import load_star_schema
+
+        with nc.get_connection() as con:
+            counts = load_star_schema(con, parquet_paths, _run_id())
+        print(f"[Load] fact orders: {counts['fact_inserted']} inserted, {counts['fact_updated']} updated, "
+              f"{counts['fact_unchanged']} unchanged -> {counts['etl_fact_orders']} rows in etl_fact_orders")
+        print(f"[Load] table row counts: {counts}")
+        return {k: int(v) for k, v in counts.items()}
+
     # ── Wiring: calling a task with another task's output creates the dependency ──────────
     customers_x = extract_customers()
     products_x = extract_products()
@@ -211,6 +264,8 @@ def nammamart_etl_harshpratapsingh():
     payments_v = validate_payments(payments_x, orders_x)
 
     quarantined = quarantine_and_log_dq(customers_v, products_v, stores_v, orders_v, payments_v)
+    transformed = transform(customers_v, products_v, stores_v, orders_v, payments_v)
+    loaded = load(transformed, quarantined)
 
 
 nammamart_etl_harshpratapsingh()

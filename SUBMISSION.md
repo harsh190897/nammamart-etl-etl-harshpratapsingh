@@ -13,9 +13,9 @@ Status of every item in section 6 of the assignment brief. ✅ done · 🟡 in p
 
 | # | Checklist item (ASSIGNMENT.md §6) | Status | Where |
 |---|---|---|---|
-| 1 | `dags/nammamart_etl_harshpratapsingh.py`, parsing with no import errors | 🟡 Extract, validate and quarantine done (A.1–A.2) | [dags/nammamart_etl_harshpratapsingh.py](dags/nammamart_etl_harshpratapsingh.py) |
+| 1 | `dags/nammamart_etl_harshpratapsingh.py`, parsing with no import errors | 🟡 Extract, validate, quarantine, transform and load done (A.1–A.3) | [dags/nammamart_etl_harshpratapsingh.py](dags/nammamart_etl_harshpratapsingh.py) |
 | 2 | `dags/nammamart_elt_harshpratapsingh.py`, parsing with no import errors | ⬜ | Part B |
-| 3 | Helper code in `include/` (quality checks, masking functions) | 🟡 Masking, audit tables, extract helpers and ETL quality rules done | [include/nammamart_common.py](include/nammamart_common.py), [include/nammamart_etl_checks.py](include/nammamart_etl_checks.py) |
+| 3 | Helper code in `include/` (quality checks, masking functions) | 🟡 Masking, audit tables, extract helpers, ETL quality rules, transform and load done | [include/nammamart_common.py](include/nammamart_common.py), [include/nammamart_etl_checks.py](include/nammamart_etl_checks.py), [include/nammamart_etl_transform.py](include/nammamart_etl_transform.py), [include/nammamart_etl_load.py](include/nammamart_etl_load.py) |
 | 4 | SQL files in `include/sql/` | ⬜ | Part B |
 | 5 | `SUBMISSION.md`: Data Issues Log (Part 0) | ✅ | [Part 0](#part-0-discovery-and-data-profiling) |
 | 6 | `SUBMISSION.md`: answers to Part C | ✅ Answered; screenshot pending | [Part C](#part-c-scheduling) |
@@ -166,16 +166,16 @@ Three proposed severities in the log above were changed from Critical to Warning
 
 ## Part A: ETL pipeline
 
-**Status:** 🟡 in progress. Extract, validate and quarantine complete (A.1–A.2).
+**Status:** 🟡 in progress. Extract, validate, quarantine, transform and load complete (A.1–A.3).
 
 **DAG:** [`dags/nammamart_etl_harshpratapsingh.py`](dags/nammamart_etl_harshpratapsingh.py), flow **Extract → Validate → Transform → Load**.
-**Helper code:** [`include/nammamart_common.py`](include/nammamart_common.py) (paths, business rules, DuckDB connection, masking, audit tables), [`include/nammamart_etl_checks.py`](include/nammamart_etl_checks.py) (data quality rules in pandas).
+**Helper code:** [`include/nammamart_common.py`](include/nammamart_common.py) (paths, business rules, DuckDB connection, masking, audit tables), [`include/nammamart_etl_checks.py`](include/nammamart_etl_checks.py) (data quality rules in pandas), [`include/nammamart_etl_transform.py`](include/nammamart_etl_transform.py) (standardise, mask, join, derive in pandas), [`include/nammamart_etl_load.py`](include/nammamart_etl_load.py) (star schema load in DuckDB SQL).
 
 | Step | Status | Tasks |
 |---|---|---|
 | A.1 Extract | ✅ | `extract_customers`, `extract_products`, `extract_stores`, `extract_orders`, `extract_payments` (run in parallel) |
 | A.2 Validate + quarantine | ✅ | `validate_customers`, `validate_products`, `validate_stores`, `validate_orders`, `validate_payments`, `quarantine_and_log_dq` |
-| A.3 Transform + load (star schema) | ⬜ | |
+| A.3 Transform + load (star schema) | ✅ | `transform`, `load` |
 | A.4 Reconcile, report, run audit | ⬜ | |
 
 **Extract (A.1).** Each task copies its source file into a per-run folder (`include/tmp/harshpratapsingh/<run_id>/extract/`), reads it as text, checks the header against the expected columns, and passes only the file path and row count to the next task. `extract_orders` also picks up every next-day file matching `orders_*_increment.csv`.
@@ -195,7 +195,40 @@ Result of a run on 2026-10-20:
 | `orders_2026-10-01_increment.csv` | 160 | 145 | 15 | 14 point to a quarantined product, 1 to a quarantined customer |
 | `payments.csv` | 2,228 | 2,209 | 19 | 4 duplicates, 6 negative amounts, 7 future-dated, 2 unknown mode `Cashh` |
 
-_Steps A.3 and A.4 to be documented as they are completed._
+**Transform (A.3, pandas).** Runs on the passed rows only, in parallel with `quarantine_and_log_dq`:
+
+- **Standardise:** trim every value; `order_status` upper case; `loyalty_tier` title case; payment modes mapped (`upi`, `UPI `, `CARD`, `cod` → `UPI`, `UPI`, `Card`, `Cash on Delivery`); placeholders such as `N/A` become NULL; a missing store zone or customer city becomes `Unknown`.
+- **Deduplicate:** one row per `customer_id`, `product_id` and `store_id` (validation already quarantined the later copies; the transform step is a safety net, and every dimension also has a `PRIMARY KEY`).
+- **Mask PII:** `email_masked` (`pr***@example.com`), `phone_masked` (`98******21`) and `name_masked` (`D*** D***`) are added and the raw `email`, `phone` and `full_name` columns are dropped before anything is written.
+- **Join and derive:** orders are joined to products for `cost_price`, then `order_date`, `net_revenue` (`order_amount` for DELIVERED orders, else 0), `gross_margin` (`net_revenue − quantity × cost_price`) and `within_15_min` (DELIVERED only) are derived.
+- **Next-day files:** orders from `orders.csv` and each increment file are combined in date order and the **latest version of each `order_id` wins**, so a correction such as DELIVERED → RETURNED replaces the old row. A fingerprint (`row_hash`) of the business columns is stored for the load step.
+
+The typed tables are handed to `load` as Parquet files in the run folder.
+
+**Load (A.3, DuckDB) into a star schema** in `include/warehouse_harshpratapsingh.duckdb`, inside **one transaction** (all tables or nothing):
+
+| Table | Grain | Load method |
+|---|---|---|
+| `etl_fact_orders` | one row per order | **MERGE on `order_id`**: new order → insert; same order with a different `row_hash` → update; identical → untouched |
+| `etl_dim_customer` | one row per customer (masked) | full refresh (the master file is a full export) |
+| `etl_dim_product` | one row per product | full refresh |
+| `etl_dim_store` | one row per store | full refresh |
+| `etl_fact_payments` | one row per payment (used for reconciliation) | full refresh |
+
+Every fact row keeps `source_file`, `source_row`, `run_id` and `loaded_at`, so any number can be traced back to the exact CSV line and the run that loaded it. The `load` task declares the five tables as **Airflow Assets** (group `nammamart_etl`), so the Assets page shows each table, the task that produces it and the time of its last successful load.
+
+Results of runs on 2026-10-20:
+
+| Run | `load` log | `etl_fact_orders` rows |
+|---|---|---|
+| First run | 2,313 inserted, 0 updated, 0 unchanged | 2,313 |
+| Re-run with the same files (idempotency) | **0 inserted, 0 updated, 2,313 unchanged** | 2,313 |
+| Day 1: `orders.csv` only (test) | 2,177 inserted | 2,177 |
+| Day 2: increment file added (test) | **136 inserted, 9 updated, 2,168 unchanged** | 2,313 |
+
+Of the 10 corrections in the increment file, 9 were applied; the tenth points to a quarantined product and is in the increment's quarantine file. Table sizes: `etl_dim_customer` 397, `etl_dim_product` 142, `etl_dim_store` 15, `etl_fact_payments` 2,209. `etl_fact_orders` holds 2,091 DELIVERED orders (net revenue ₹1,128,410.45), 147 CANCELLED and 75 RETURNED.
+
+_Step A.4 (reconcile, reports, run audit) to be documented when completed._
 
 ---
 

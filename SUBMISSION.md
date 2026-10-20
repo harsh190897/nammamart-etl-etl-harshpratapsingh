@@ -14,9 +14,9 @@ Status of every item in section 6 of the assignment brief. ✅ done · 🟡 in p
 | # | Checklist item (ASSIGNMENT.md §6) | Status | Where |
 |---|---|---|---|
 | 1 | `dags/nammamart_etl_harshpratapsingh.py`, parsing with no import errors | ✅ Complete (16 tasks), no import errors | [dags/nammamart_etl_harshpratapsingh.py](dags/nammamart_etl_harshpratapsingh.py) |
-| 2 | `dags/nammamart_elt_harshpratapsingh.py`, parsing with no import errors | 🟡 Extract and raw layer done (B.1), no import errors | [dags/nammamart_elt_harshpratapsingh.py](dags/nammamart_elt_harshpratapsingh.py) |
-| 3 | Helper code in `include/` (quality checks, masking functions) | 🟡 ETL helpers complete (quality rules, masking, transform, load, reconciliation, reports, audit tables); ELT helpers in Part B | [include/nammamart_common.py](include/nammamart_common.py), [include/nammamart_etl_checks.py](include/nammamart_etl_checks.py), [include/nammamart_etl_transform.py](include/nammamart_etl_transform.py), [include/nammamart_etl_load.py](include/nammamart_etl_load.py) |
-| 4 | SQL files in `include/sql/` | 🟡 Raw layer done; staging and marts in progress | [include/sql/](include/sql/) |
+| 2 | `dags/nammamart_elt_harshpratapsingh.py`, parsing with no import errors | 🟡 Extract, raw and staging layers done (B.1–B.2), no import errors | [dags/nammamart_elt_harshpratapsingh.py](dags/nammamart_elt_harshpratapsingh.py) |
+| 3 | Helper code in `include/` (quality checks, masking functions) | 🟡 ETL helpers complete (quality rules, masking, transform, load, reconciliation, reports, audit tables); ELT helpers and SQL quality rules and masking macros done | [include/nammamart_common.py](include/nammamart_common.py), [include/nammamart_elt.py](include/nammamart_elt.py), [include/nammamart_etl_checks.py](include/nammamart_etl_checks.py), [include/nammamart_etl_transform.py](include/nammamart_etl_transform.py), [include/nammamart_etl_load.py](include/nammamart_etl_load.py) |
+| 4 | SQL files in `include/sql/` | 🟡 Raw and staging layers done; marts in progress | [include/sql/](include/sql/) |
 | 5 | `SUBMISSION.md`: Data Issues Log (Part 0) | ✅ | [Part 0](#part-0-discovery-and-data-profiling) |
 | 6 | `SUBMISSION.md`: answers to Part C | ✅ Answered, with schedule screenshot | [Part C](#part-c-scheduling) |
 | 7 | `SUBMISSION.md`: governance answers (Part E) | ⬜ | [Part E](#part-e-data-governance) |
@@ -273,7 +273,7 @@ The total of both tables equals the DELIVERED net revenue in `etl_fact_orders` (
 
 ## Part B: ELT pipeline
 
-**Status:** 🟡 in progress. Extract and raw layer complete (B.1).
+**Status:** 🟡 in progress. Extract, raw and staging layers complete (B.1–B.2).
 
 **DAG:** [`dags/nammamart_elt_harshpratapsingh.py`](dags/nammamart_elt_harshpratapsingh.py), flow **Extract → Load raw → Transform in the warehouse with SQL**. Same schedule settings as the ETL DAG (see [Part C](#part-c-scheduling)).
 **Helper code:** [`include/nammamart_elt.py`](include/nammamart_elt.py) (file snapshot and header check, and a runner that executes `.sql` files in one transaction with the run's parameters). **SQL:** [`include/sql/`](include/sql/).
@@ -281,7 +281,7 @@ The total of both tables equals the DELIVERED net revenue in `etl_fact_orders` (
 | Step | Status | Tasks | SQL |
 |---|---|---|---|
 | B.1 Extract + raw layer | ✅ | `extract_customers`, `extract_products`, `extract_stores`, `extract_orders`, `extract_payments` (parallel), `load_raw`, `load_raw_increments` | [`raw/raw_tables.sql`](include/sql/raw/raw_tables.sql), [`raw/load_raw.sql`](include/sql/raw/load_raw.sql), [`raw/load_raw_increments.sql`](include/sql/raw/load_raw_increments.sql) |
-| B.2 Staging layer + data quality in SQL | ⬜ | | |
+| B.2 Staging layer + data quality in SQL | ✅ | `staging.stg_stores` → `stg_products` → `stg_customers` → `stg_orders` → `stg_payments` (task group, one after another) | [`common/macros.sql`](include/sql/common/macros.sql), [`common/dq_setup.sql`](include/sql/common/dq_setup.sql), [`staging/stg_*.sql`](include/sql/staging/) |
 | B.3 Mart layer + run audit | ⬜ | | |
 | B.4 ETL vs ELT comparison | ⬜ | | |
 
@@ -298,7 +298,39 @@ The total of both tables equals the DELIVERED net revenue in `etl_fact_orders` (
 
 Result of a run on 2026-10-20 (rows per run): `raw_customers` 405, `raw_products` 152, `raw_stores` 15, `raw_orders` 2,412 + 160 (increment), `raw_payments` 2,228. A second run with the same files appends a second batch of the same size (`raw_orders` 2,572 → 5,144 rows in total).
 
-_Steps B.2–B.4 to be documented as they are completed._
+**Staging layer (B.2), SQL only.** Each staging task runs three SQL files: [`common/macros.sql`](include/sql/common/macros.sql) (small SQL functions for cleaning, type conversion and PII masking), [`common/dq_setup.sql`](include/sql/common/dq_setup.sql) (the rule catalog `elt_dq_rules` and the `stg_rejected_rows` table) and its own [`staging/stg_<table>.sql`](include/sql/staging/). Each staging file reads only **this run's batch** of its raw table and follows the same four steps:
+
+1. **Type, standardise and check.** Cast types (`TRY_CAST`, `try_strptime` with the exact formats), trim values, map payment modes (`upi`, `UPI `, `cod` → `UPI`, `UPI`, `Cash on Delivery`), title-case `loyalty_tier`, turn placeholders such as `N/A` into NULL, show a missing store zone or customer city as `Unknown`, and **mask PII** in SQL (`mask_email`, `mask_phone`, `mask_name`; the raw columns are not carried into staging). Every rule becomes one TRUE/FALSE column named `fail__<rule>`.
+2. **failure_reason.** The `fail__` columns are unpivoted and joined to the rule catalog; the reasons of every Critical rule a row breaks are joined in rule order.
+3. **Results.** One `dq_results` row per rule (and per file for orders), plus the file-level **freshness** and **volume** checks; every rejected row (duplicate copies included) is listed in `stg_rejected_rows` with its file, CSV line and reason. Re-running the same run replaces its rows, so retries never create duplicates.
+4. **Staging table.** One row per key (later copies of a duplicate are removed), with `dq_status` (`VALID` / `REJECTED`) and `failure_reason`. Rejected rows are **kept and flagged**, not deleted; the marts will use only `VALID` rows.
+
+The rule catalog holds the **same 72 row rules plus 2 file-level checks (freshness, volume)** as the ETL pipeline (same names, dimensions, severities, order and reason text), and every threshold and allowed list (120 minutes, 8–35 minutes, ₹0.01, 24 hours, 90 %, valid statuses, modes, zones, tiers) is passed to the SQL from `include/nammamart_common.py`, so a rule is changed in one place for both pipelines.
+
+**Incremental load, staging step (B.2): MERGE on `order_id`.** `stg_orders` is a persistent table. For each order the latest **valid** version wins (a next-day file is newer than `orders.csv`); if no version is valid, the latest version is kept as `REJECTED`. The batch is then merged with a fingerprint (`row_hash`) of the source values and the quality result: new order → **insert**, changed order → **update**, identical order → untouched.
+
+| Run | MERGE result | `stg_orders` |
+|---|---|---|
+| First run (both files) | 2,550 inserted, 0 updated | 2,550 orders (2,313 VALID, 237 REJECTED) |
+| Re-run with the same files | **0 inserted, 0 updated, 2,550 unchanged** | 2,550 |
+| Day 1 without the increment file (test) | 2,400 inserted | 2,400 |
+| Day 2 with the increment file (test) | **150 inserted, 10 updated** | 2,550, no duplicates; e.g. `ORD000017` is now `RETURNED`, `_source_file = orders_2026-10-01_increment.csv` |
+
+ELT updates all 10 corrections (one of them is rejected, but staging keeps rejected rows with their flag), while the ETL fact table updated 9 (it holds only valid rows).
+
+**Same result as ETL.** A unit test runs the ETL Python rules and the ELT SQL on the same files and checks that they agree exactly:
+
+| | ETL | ELT |
+|---|---|---|
+| Checks in `dq_results` (name, dimension, severity, rows checked, rows failed) | 110 | 110, identical |
+| Rejected rows (file, line, reason text) | 287 quarantined | 287 in `stg_rejected_rows`, identical |
+| Valid orders | 2,313 in `etl_fact_orders` | 2,313 `VALID` in `stg_orders`, same IDs, status, amount, mode and source file |
+| Delivered net revenue | ₹1,128,410.45 | ₹1,128,410.45 |
+| Masked name / email / phone of the 397 valid customers | | identical |
+
+Staging tables after a run: `stg_customers` 397 VALID + 3 REJECTED, `stg_products` 142 + 8, `stg_stores` 15 + 0, `stg_orders` 2,313 + 237, `stg_payments` 2,209 + 15.
+
+_Steps B.3–B.4 to be documented as they are completed._
 
 ---
 
@@ -338,7 +370,7 @@ The scheduler is not running, so nothing runs at 09:00 and the numbers are not r
 
 ## Part D: Data quality dimensions
 
-**Status:** 🟡 ETL checks done; ELT checks to be added in Part B.
+**Status:** ✅ ETL (Python) and ELT (SQL) checks done; both write the same 110 checks to `dq_results` on every run.
 
 **Critical** = the row is quarantined with a `failure_reason`. **Warning** = the row is loaded and the problem is counted. Every check, of either severity, writes one row to `dq_results` on every run (`run_id`, `dag_id`, `check_name`, `dimension`, `severity`, `rows_checked`, `rows_failed`, `status`, `checked_at`); `status` is PASS, WARN (Warning check with failures) or FAIL (Critical check with failures). Check names are `<file>.<rule>`, for example `orders.order_amount_matches_formula`.
 
@@ -359,7 +391,9 @@ Query result: the `dq_results` scorecard per run, and the checks that did not pa
 
 ![Query result: dq_results scorecard per run and failing checks](docs/screenshots/05_dq_results.png)
 
-**ELT checks (SQL):** _to be completed in Part B._
+**ELT checks (SQL, [`include/sql/common/dq_setup.sql`](include/sql/common/dq_setup.sql) + [`include/sql/staging/`](include/sql/staging/))**
+
+The ELT pipeline implements **the same checks in SQL**: same names, dimensions, severities and reasons, listed once in the rule catalog table `elt_dq_rules`. Each staging file computes one TRUE/FALSE column per rule, and generic SQL turns them into `failure_reason`, `dq_status` and the `dq_results` rows (with `dag_id = nammamart_elt_harshpratapsingh`). A unit test checks that, on the same files, the two pipelines report identical results for all 110 checks and reject the same 287 rows for the same reasons. The one difference is the meaning of Critical: ETL removes the row before loading (quarantine file), ELT keeps it in staging with `dq_status = 'REJECTED'` and lists it in `stg_rejected_rows`; in both cases it never reaches the reporting tables.
 
 ---
 

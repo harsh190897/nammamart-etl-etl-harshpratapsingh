@@ -3,6 +3,7 @@
 Run locally from the project root:   pytest tests/test_nammamart_elt.py -v
 Run inside Astro (Docker):           astro dev pytest tests/test_nammamart_elt.py
 """
+import re
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -116,3 +117,176 @@ def test_schema_change_fails_loudly_and_loads_nothing(con, tmp_path):
 def test_sql_variable_names_are_validated(con):
     with pytest.raises(ValueError, match="Invalid SQL variable name"):
         elt.run_sql_files(con, [], {"run_id; DROP TABLE x": "1"})
+
+
+# ── Staging layer and data quality in SQL (Part B.2) ──────────────────────────────────
+STAGING_ORDER = ["stores", "products", "customers", "orders", "payments"]
+AS_OF = pd.Timestamp("2026-10-20 09:00")
+
+
+def run_staging(con, run_id, as_of=AS_OF, dag_id="elt_test"):
+    """What the DAG's five staging tasks do, without Airflow."""
+    nc.init_audit_tables(con)
+    for entity in STAGING_ORDER:
+        elt.run_sql_files(con, ["common/macros.sql", "common/dq_setup.sql", f"staging/stg_{entity}.sql"],
+                          elt.staging_variables(run_id, dag_id, as_of))
+
+
+@pytest.fixture(scope="module")
+def staged(tmp_path_factory):
+    connection = duckdb.connect(str(tmp_path_factory.mktemp("elt") / "elt.duckdb"))
+    load_raw(connection, "run_1")
+    run_staging(connection, "run_1")
+    yield connection
+    connection.close()
+
+
+@pytest.fixture(scope="module")
+def etl():
+    """The ETL pipeline's validation and transform on the same files, for comparison."""
+    import nammamart_etl_checks as ck
+    import nammamart_etl_transform as tf
+
+    raw = {entity: nc.read_text_csv(nc.DATA_DIR / name) for entity, name in nc.SOURCE_FILES.items()}
+    increment = nc.read_text_csv(nc.DATA_DIR / nc.INCREMENT_FILE)
+    customers = ck.validate_customers(raw["customers"], AS_OF)
+    products = ck.validate_products(raw["products"])
+    stores = ck.validate_stores(raw["stores"])
+
+    def ids(df, key):
+        return set(df[key].str.strip())
+
+    refs = {"customer_id": (ids(raw["customers"], "customer_id"), ids(customers.passed, "customer_id")),
+            "product_id": (ids(raw["products"], "product_id"), ids(products.passed, "product_id")),
+            "store_id": (ids(raw["stores"], "store_id"), ids(stores.passed, "store_id"))}
+    orders = ck.validate_orders(raw["orders"], "orders.csv", refs, AS_OF)
+    increment_v = ck.validate_orders(increment, nc.INCREMENT_FILE, refs, AS_OF)
+    payments = ck.validate_payments(raw["payments"], ids(raw["orders"], "order_id") | ids(increment, "order_id"), AS_OF)
+    results = [customers, products, stores, orders, increment_v, payments]
+    checks = [c for r in results for c in r.checks] + [ck.volume_check("orders.volume_vs_previous_run", 2412, None)]
+    return {
+        "checks": pd.DataFrame(checks),
+        "rejected": pd.concat([r.failed[["source_file", "source_row", "failure_reason"]] for r in results]),
+        "fact": tf.build_fact_orders([orders.passed, increment_v.passed], tf.build_dim_product(products.passed)),
+        "dim_customer": tf.build_dim_customer(customers.passed),
+    }
+
+
+def test_every_rule_column_has_a_catalog_entry(staged):
+    for entity in STAGING_ORDER:
+        sql = (nc.SQL_DIR / "staging" / f"stg_{entity}.sql").read_text()
+        columns = set(re.findall(r"AS (fail__\w+)", sql))
+        rules = {f"fail__{r}" for (r,) in staged.execute(
+            "SELECT rule FROM elt_dq_rules WHERE entity = ? AND reason IS NOT NULL", [entity]).fetchall()}
+        assert columns == rules, f"stg_{entity}.sql and elt_dq_rules disagree: {columns ^ rules}"
+
+
+def test_dq_results_match_the_etl_checks_exactly(staged, etl):
+    elt_checks = staged.execute("""SELECT check_name, dimension, severity, rows_checked, rows_failed
+                                   FROM dq_results WHERE run_id = 'run_1'""").df()
+    merged = etl["checks"].merge(elt_checks, on="check_name", how="outer", suffixes=("_etl", "_elt"), indicator=True)
+    assert (merged["_merge"] == "both").all(), merged.loc[merged["_merge"] != "both", "check_name"].tolist()
+    for column in ("dimension", "severity", "rows_checked", "rows_failed"):
+        different = merged[merged[f"{column}_etl"] != merged[f"{column}_elt"]]
+        assert different.empty, different[["check_name", f"{column}_etl", f"{column}_elt"]]
+    assert len(elt_checks) == 110 and set(elt_checks["dimension"]) == set(nc.DQ_DIMENSIONS)
+
+
+def test_rejected_rows_and_reasons_match_the_etl_quarantine(staged, etl):
+    elt_rejected = staged.execute("SELECT source_file, source_row, failure_reason FROM stg_rejected_rows "
+                                  "WHERE _run_id = 'run_1'").df()
+    etl_rejected = etl["rejected"].astype({"source_row": "int64"})
+    merged = etl_rejected.merge(elt_rejected, on=["source_file", "source_row"], how="outer",
+                                suffixes=("_etl", "_elt"), indicator=True)
+    assert (merged["_merge"] == "both").all()
+    assert (merged["failure_reason_etl"] == merged["failure_reason_elt"]).all()
+    assert elt_rejected.groupby("source_file").size().to_dict() == {
+        "customers.csv": 8, "products.csv": 10, "orders.csv": 235, nc.INCREMENT_FILE: 15, "payments.csv": 19}
+
+
+def test_valid_orders_match_the_etl_fact_table(staged, etl):
+    elt_valid = staged.execute("""SELECT order_id, order_status, order_amount, payment_mode, _source_file
+                                  FROM stg_orders WHERE dq_status = 'VALID'""").df()
+    fact = etl["fact"]
+    assert set(elt_valid["order_id"]) == set(fact["order_id"]) and len(elt_valid) == 2313
+    joined = fact.merge(elt_valid, on="order_id", suffixes=("_etl", "_elt"))
+    assert (joined["order_status_etl"] == joined["order_status_elt"]).all()
+    assert (joined["payment_mode_etl"] == joined["payment_mode_elt"]).all()
+    assert (joined["source_file"] == joined["_source_file"]).all()
+    assert ((joined["order_amount_etl"] - joined["order_amount_elt"]).abs() < 1e-9).all()
+
+
+def test_staging_masks_personal_data_like_the_etl(staged, etl):
+    columns = [row[0] for row in staged.execute("DESCRIBE stg_customers").fetchall()]
+    assert not {"full_name", "email", "phone"} & set(columns)
+    elt_dim = staged.execute("""SELECT customer_id, name_masked, email_masked, phone_masked, city, loyalty_tier
+                                FROM stg_customers WHERE dq_status = 'VALID'""").df().set_index("customer_id")
+    etl_dim = etl["dim_customer"].set_index("customer_id")
+    assert set(elt_dim.index) == set(etl_dim.index)
+    for column in ("name_masked", "email_masked", "phone_masked", "city", "loyalty_tier"):
+        assert (elt_dim.loc[etl_dim.index, column].fillna("<NULL>") == etl_dim[column].fillna("<NULL>")).all(), column
+
+
+def test_staging_keeps_one_row_per_key_with_status(staged):
+    counts = {t: dict(staged.execute(f"SELECT dq_status, count(*) FROM {t} GROUP BY 1").fetchall())
+              for t in ("stg_customers", "stg_products", "stg_stores", "stg_orders", "stg_payments")}
+    assert counts == {"stg_customers": {"VALID": 397, "REJECTED": 3}, "stg_products": {"VALID": 142, "REJECTED": 8},
+                      "stg_stores": {"VALID": 15}, "stg_orders": {"VALID": 2313, "REJECTED": 237},
+                      "stg_payments": {"VALID": 2209, "REJECTED": 15}}
+    zone = staged.execute("SELECT zone, dq_status FROM stg_stores WHERE store_id = 'S07'").fetchone()
+    assert zone == ("Unknown", "VALID")
+
+
+def test_rerun_of_the_same_run_creates_no_duplicates(tmp_path):
+    con = duckdb.connect(str(tmp_path / "elt.duckdb"))
+    load_raw(con, "run_1")
+    run_staging(con, "run_1")
+    run_staging(con, "run_1")                                      # Airflow retry / Clear
+    assert con.execute("SELECT count(*) FROM dq_results").fetchone()[0] == 110
+    assert con.execute("SELECT count(*) FROM stg_rejected_rows").fetchone()[0] == 287
+    assert con.execute("SELECT * FROM merge_counts").fetchone() == (2550, 0, 0)
+    con.close()
+
+
+def test_next_run_merges_nothing_and_raw_grows(tmp_path):
+    con = duckdb.connect(str(tmp_path / "elt.duckdb"))
+    load_raw(con, "run_1")
+    run_staging(con, "run_1")
+    load_raw(con, "run_2")
+    run_staging(con, "run_2")
+    assert con.execute("SELECT * FROM merge_counts").fetchone() == (2550, 0, 0)    # 0 inserted, 0 updated
+    assert con.execute("SELECT count(*) FROM stg_orders").fetchone()[0] == 2550
+    assert con.execute("SELECT count(*) FROM raw_orders").fetchone()[0] == 2 * 2572
+    con.close()
+
+
+def test_increment_merge_updates_10_corrections_and_adds_150_orders(tmp_path):
+    con = duckdb.connect(str(tmp_path / "elt.duckdb"))
+    load_raw(con, "day_1", increments=())                          # experiment 3, day 1: no increment file
+    run_staging(con, "day_1")
+    assert con.execute("SELECT * FROM merge_counts").fetchone() == (2400, 2400, 0)
+    load_raw(con, "day_2")                                         # day 2: increment file added
+    run_staging(con, "day_2")
+    assert con.execute("SELECT * FROM merge_counts").fetchone() == (2550, 150, 10)
+    assert con.execute("SELECT count(*), count(DISTINCT order_id) FROM stg_orders").fetchone() == (2550, 2550)
+    corrected = con.execute("""SELECT order_status, _source_file FROM stg_orders
+                               WHERE order_id = 'ORD000017'""").fetchone()
+    assert corrected == ("RETURNED", nc.INCREMENT_FILE)
+    con.close()
+
+
+def test_volume_check_warns_when_orders_drop_by_more_than_90_percent(tmp_path):
+    con = duckdb.connect(str(tmp_path / "elt.duckdb"))
+    load_raw(con, "run_1")
+    run_staging(con, "run_1")
+    small = tmp_path / "small"
+    small.mkdir()
+    for file_name in nc.SOURCE_FILES.values():
+        lines = (nc.DATA_DIR / file_name).read_text().splitlines(keepends=True)
+        (small / file_name).write_text("".join(lines[:51]) if file_name == "orders.csv" else "".join(lines))
+    load_raw(con, "run_2", data_dir=small, increments=())          # experiment 7: only 50 orders
+    run_staging(con, "run_2")
+    status = con.execute("""SELECT rows_failed, status FROM dq_results
+                            WHERE run_id = 'run_2' AND check_name = 'orders.volume_vs_previous_run'""").fetchone()
+    assert status == (1, "WARN")
+    con.close()

@@ -88,3 +88,40 @@ def table_counts(con, tables: list, run_id: str = None) -> dict:
         else:
             counts[table] = con.execute(f"SELECT count(*) FROM {table} WHERE _run_id = ?", [run_id]).fetchone()[0]
     return counts
+
+
+def staging_variables(run_id: str, dag_id: str, as_of=None) -> dict:
+    """Run parameters and business rules for the staging SQL, all taken from nammamart_common.py,
+    so the ELT SQL and the ETL Python use exactly the same values (one place to change a rule).
+
+    as_of is the Bengaluru time the checks compare with ("is this date in the future?").
+    """
+    now = nc.utc_now()
+    as_of = nc.local_now() if as_of is None else as_of
+    if hasattr(as_of, "to_pydatetime"):
+        as_of = as_of.to_pydatetime()
+    low, high = nc.NORMAL_DELIVERY_RANGE
+    return {
+        "run_id": run_id,
+        "dag_id": dag_id,
+        "as_of": as_of,
+        "checked_at": now,
+        "loaded_at": now,
+        "missing_values": list(nc.MISSING_VALUES),
+        "timestamp_format": nc.TIMESTAMP_FORMAT,
+        "date_format": nc.DATE_FORMAT,
+        "valid_order_status": list(nc.VALID_ORDER_STATUS),
+        "valid_payment_status": list(nc.VALID_PAYMENT_STATUS),
+        "payment_mode_keys": list(nc.PAYMENT_MODE_MAP),
+        "payment_mode_values": list(nc.PAYMENT_MODE_MAP.values()),
+        "loyalty_tiers": list(nc.LOYALTY_TIERS),
+        "valid_zones": list(nc.VALID_ZONES),
+        "valid_channels": list(nc.VALID_CHANNELS),
+        "unknown": nc.UNKNOWN,
+        "max_delivery_minutes": nc.MAX_DELIVERY_MINUTES,
+        "normal_delivery_min": low,
+        "normal_delivery_max": high,
+        "amount_tolerance": nc.AMOUNT_TOLERANCE,
+        "freshness_max_age_hours": nc.FRESHNESS_MAX_AGE_HOURS,
+        "volume_drop_warn_pct": nc.VOLUME_DROP_WARN_PCT,
+    }

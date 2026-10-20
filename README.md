@@ -23,9 +23,9 @@ Both write to a local DuckDB warehouse and record every quality check (`dq_resul
 |---|---|
 | 0. Data profiling and issues log | ✅ Done |
 | A. ETL pipeline | ✅ Done (16 tasks: extract, validate, quarantine, transform, load, reconcile, report, run audit) |
-| B. ELT pipeline | 🟡 Extract and raw layer done; staging and marts in progress |
+| B. ELT pipeline | 🟡 Extract, raw and staging layers done (same 110 checks and 287 rejected rows as ETL); marts in progress |
 | C. Scheduling | ✅ Answered (ETL) |
-| D. Data quality dimensions | 🟡 ETL checks done (110 checks, all 6 dimensions); ELT checks in Part B |
+| D. Data quality dimensions | ✅ 110 checks across all 6 dimensions, in Python (ETL) and SQL (ELT), written to `dq_results` every run |
 | E. Data governance | ⬜ Not started |
 | F. Observability tests | 🟡 Run audit (`pipeline_runs`) done for ETL; experiments not started |
 | G. Recommendation | ⬜ Not started |
@@ -46,11 +46,13 @@ include/
   nammamart_elt.py                    ELT helpers: file snapshot + header check, run .sql files with run parameters
   data/nammamart/                     source CSV files (copied from assignment/nammamart_dataset, never edited)
   sql/raw/                            ELT raw layer: table definitions, load_raw, load_raw_increments
+  sql/common/                         ELT SQL macros (cleaning, masking) and the data quality rule catalog
+  sql/staging/                        ELT staging layer: one SQL file per table (types, dedupe, masking, quality rules, MERGE)
   quarantine/harshpratapsingh/        rejected rows with failure_reason (generated, not committed)
   tmp/harshpratapsingh/               per-run working files (generated, not committed)
   warehouse_harshpratapsingh.duckdb   DuckDB warehouse (generated, not committed)
 profiling/                            Part 0 profiling scripts and the Data Issues Log CSVs
-tests/                                unit tests (pytest) and Astro's DAG integrity test
+tests/                                unit tests (pytest); tests/dags: DAG structure tests and Astro's DAG integrity test
 docs/screenshots/                     screenshots referenced in SUBMISSION.md
 ```
 

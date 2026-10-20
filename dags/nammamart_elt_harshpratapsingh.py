@@ -4,24 +4,28 @@ dags/nammamart_elt_harshpratapsingh.py
 NammaMart ELT pipeline (Part B): Extract -> Load raw -> Transform in the warehouse with SQL.
 Every source row is loaded into the raw tables exactly as received; cleaning happens later, in SQL.
 
-Graph so far (B.1):
+Graph so far (B.1 + B.2):
   extract_customers --+
   extract_products  --+
-  extract_stores    --+--> load_raw --> load_raw_increments
+  extract_stores    --+--> load_raw --> load_raw_increments --> [staging]
   extract_orders    --+
   extract_payments  --+
+  [staging] = stg_stores -> stg_products -> stg_customers -> stg_orders -> stg_payments
+              (one after another: DuckDB allows one writer, and orders are checked against the staged masters)
 
 Helper code:
   include/nammamart_common.py     paths, constants, DuckDB connection, audit tables (shared with the ETL DAG)
   include/nammamart_elt.py        snapshot + header check, run .sql files with run parameters
   include/sql/raw/*.sql           raw layer SQL
+  include/sql/common/*.sql        SQL macros (cleaning, masking) and the data quality rule catalog
+  include/sql/staging/*.sql       staging layer SQL: types, standardisation, dedupe, masking, quality rules
 """
 import sys
 from datetime import timedelta
 from pathlib import Path
 
 import pendulum
-from airflow.sdk import Asset, dag, get_current_context, task
+from airflow.sdk import Asset, dag, get_current_context, task, task_group
 
 # Make include/ importable (same idea as meridian_pipeline.py, but works from any project path)
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "include"))
@@ -50,6 +54,38 @@ def _run_id() -> str:
 def _extract(entity: str) -> dict:
     from nammamart_elt import snapshot_source_files
     return snapshot_source_files(entity, _run_id())
+
+
+def _run_staging(entity: str) -> dict:
+    """Run include/sql/staging/stg_<entity>.sql on this run's raw batch and log what happened."""
+    import nammamart_common as nc
+    from nammamart_elt import run_sql_files, staging_variables
+
+    run_id = _run_id()
+    table = f"stg_{entity}"
+    with nc.get_connection() as con:
+        nc.init_audit_tables(con)                      # dq_results is shared with the ETL DAG
+        run_sql_files(con, ["common/macros.sql", "common/dq_setup.sql", f"staging/{table}.sql"],
+                      staging_variables(run_id, DAG_ID))
+        status = dict(con.execute(f"SELECT dq_status, count(*) FROM {table} GROUP BY 1").fetchall())
+        rejected = dict(con.execute("""
+            SELECT source_file, count(*) FROM stg_rejected_rows
+            WHERE _run_id = ? AND source_file IN (SELECT DISTINCT _source_file FROM chk)
+            GROUP BY 1 ORDER BY 1""", [run_id]).fetchall())
+        merge = None
+        if entity == "orders":
+            row = con.execute("SELECT rows_in_batch, inserted, updated FROM merge_counts").fetchone()
+            merge = {"rows_in_batch": row[0], "inserted": row[1], "updated": row[2],
+                     "unchanged": row[0] - row[1] - row[2]}
+
+    print(f"[Staging] {table}: {status.get('VALID', 0)} VALID, {status.get('REJECTED', 0)} REJECTED")
+    for file_name, rows in rejected.items():
+        print(f"[Staging] {file_name}: {rows} rows rejected this run (see stg_rejected_rows)")
+    if merge:
+        print(f"[Staging] MERGE into stg_orders: {merge['inserted']} inserted, {merge['updated']} updated, "
+              f"{merge['unchanged']} unchanged")
+    return {"table": table, "valid": status.get("VALID", 0), "rejected": status.get("REJECTED", 0),
+            "rejected_rows": rejected, "merge": merge}
 
 
 @dag(
@@ -133,6 +169,35 @@ def nammamart_elt_harshpratapsingh():
         print(f"[Load raw increments] raw_orders now has {total} rows in total")
         return {"files": loaded, "rows": sum(f["rows"] for f in loaded)}
 
+    # ── 4. STAGING: SQL only, one task per table, one after another ──────────────────────────
+    @task(outlets=_assets("stg_stores", "stg_rejected_rows"))
+    def stg_stores():
+        return _run_staging("stores")
+
+    @task(outlets=_assets("stg_products", "stg_rejected_rows"))
+    def stg_products():
+        return _run_staging("products")
+
+    @task(outlets=_assets("stg_customers", "stg_rejected_rows"))
+    def stg_customers():
+        return _run_staging("customers")
+
+    @task(outlets=_assets("stg_orders", "stg_rejected_rows"))
+    def stg_orders():
+        return _run_staging("orders")
+
+    @task(outlets=_assets("stg_payments", "stg_rejected_rows"))
+    def stg_payments():
+        return _run_staging("payments")
+
+    @task_group(group_id="staging")
+    def staging():
+        # The group returns nothing, so calling staging() gives back the whole group:
+        # "upstream >> group" then makes the FIRST task (stg_stores) wait, not only the last one.
+        stores, products, customers = stg_stores(), stg_products(), stg_customers()
+        orders, payments = stg_orders(), stg_payments()
+        stores >> products >> customers >> orders >> payments
+
     # ── Wiring: calling a task with another task's output creates the dependency ──────────
     customers_x = extract_customers()
     products_x = extract_products()
@@ -142,6 +207,8 @@ def nammamart_elt_harshpratapsingh():
 
     raw = load_raw(customers_x, products_x, stores_x, orders_x, payments_x)
     raw_increments = load_raw_increments(orders_x, raw)
+    staged = staging()
+    raw_increments >> staged
 
 
 nammamart_elt_harshpratapsingh()

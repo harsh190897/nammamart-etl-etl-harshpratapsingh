@@ -27,7 +27,7 @@ Both write to a local DuckDB warehouse and record every quality check (`dq_resul
 | C. Scheduling | ✅ Answered (ETL) |
 | D. Data quality dimensions | ✅ 110 checks across all 6 dimensions, in Python (ETL) and SQL (ELT), written to `dq_results` every run |
 | E. Data governance | ⬜ Not started |
-| F. Observability tests | 🟡 Run audit (`pipeline_runs`) done for both DAGs; experiments not started |
+| F. Observability tests | ✅ Run audit (`pipeline_runs`) in both DAGs; 10 experiments (plus 8b and 9b) run on both DAGs; five-pillar mapping |
 | G. Recommendation | ⬜ Not started |
 
 ## Project structure

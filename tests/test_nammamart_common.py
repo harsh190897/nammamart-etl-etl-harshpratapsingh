@@ -138,3 +138,33 @@ def test_connection_waits_for_lock(tmp_path):
     with nc.get_connection(db, retries=10, wait_seconds=1) as con:
         assert con.execute("SELECT 42").fetchone() == (42,)
     proc.wait()
+
+
+# ── Extract helpers (Part A.1) ────────────────────────────────────────
+def test_every_source_file_has_the_expected_header():
+    for entity, file_name in nc.SOURCE_FILES.items():
+        df = nc.read_text_csv(nc.DATA_DIR / file_name)
+        nc.check_columns(df, nc.EXPECTED_COLUMNS[entity], file_name)      # raises if the header changed
+    increments = sorted(nc.DATA_DIR.glob(nc.INCREMENT_GLOB))
+    assert [p.name for p in increments] == [nc.INCREMENT_FILE]
+
+
+def test_check_columns_catches_a_renamed_column():
+    df = pd.DataFrame(columns=[c if c != "order_amount" else "total" for c in nc.EXPECTED_COLUMNS["orders"]])
+    with pytest.raises(ValueError, match=r"missing columns \['order_amount'\], unexpected columns \['total'\]"):
+        nc.check_columns(df, nc.EXPECTED_COLUMNS["orders"], "orders.csv")
+
+
+def test_read_text_csv_keeps_values_as_text(tmp_path):
+    path = tmp_path / "x.csv"
+    path.write_text("id,pincode,note\n007,560001,N/A\n")
+    df = nc.read_text_csv(path)
+    assert df.iloc[0].to_dict() == {"id": "007", "pincode": "560001", "note": "N/A"}
+
+
+def test_run_dir_is_created_per_run(tmp_path, monkeypatch):
+    monkeypatch.setattr(nc, "TMP_DIR", tmp_path / "tmp")
+    folder = nc.run_dir("manual__2026-10-20T07:35:00+00:00", "extract")
+    assert folder.is_dir()
+    assert folder == tmp_path / "tmp" / "manual__2026-10-20T07_35_00_00_00" / "extract"
+

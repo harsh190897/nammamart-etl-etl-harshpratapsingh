@@ -46,6 +46,21 @@ SOURCE_FILES = {
     "stores": "stores.csv",
 }
 INCREMENT_FILE = "orders_2026-10-01_increment.csv"
+# Next-day order files follow this pattern; the ETL picks up every file that matches.
+INCREMENT_GLOB = "orders_*_increment.csv"
+
+# Header each source file must have. Extract fails loudly if a column is missing or renamed.
+EXPECTED_COLUMNS = {
+    "orders": ["order_id", "order_ts", "customer_id", "store_id", "product_id", "quantity", "unit_price",
+               "discount_pct", "order_amount", "payment_mode", "order_status", "channel", "delivery_minutes"],
+    "payments": ["payment_id", "order_id", "payment_ts", "payment_mode", "amount_paid", "payment_status", "gateway_ref"],
+    "customers": ["customer_id", "full_name", "email", "phone", "city", "area", "pincode", "signup_date",
+                  "loyalty_tier", "is_active"],
+    "products": ["product_id", "product_name", "category", "sub_category", "brand", "mrp", "cost_price", "unit",
+                 "is_perishable", "launch_date"],
+    "stores": ["store_id", "store_name", "zone", "area", "pincode", "open_date", "manager_name",
+               "capacity_orders_per_day"],
+}
 
 # ─────────────────────────── 2. Business constants ───────────────────────────
 # One place for every rule value, so a rule change (e.g. the 120-minute limit) is a one-line edit.
@@ -94,6 +109,27 @@ def quarantine_path(file_name: str, run_id: str) -> Path:
     """include/quarantine/<name>/<file>_failed_<run_id>.csv  (creates the folder if needed)."""
     QUARANTINE_DIR.mkdir(parents=True, exist_ok=True)
     return QUARANTINE_DIR / f"{Path(file_name).stem}_failed_{safe_run_id(run_id)}.csv"
+
+
+def run_dir(run_id: str, *parts: str) -> Path:
+    """Working folder for one DAG run: include/tmp/<name>/<run_id>/<parts...> (created if needed).
+    Tasks pass file paths to each other through XCom instead of passing whole DataFrames."""
+    folder = TMP_DIR.joinpath(safe_run_id(run_id), *parts)
+    folder.mkdir(parents=True, exist_ok=True)
+    return folder
+
+
+def read_text_csv(path) -> pd.DataFrame:
+    """Read a CSV with every column as text, exactly as received (same rule as the profiling scripts)."""
+    return pd.read_csv(path, dtype=str, keep_default_na=False)
+
+
+def check_columns(df: pd.DataFrame, expected: list, file_name: str) -> None:
+    """Raise a clear error if the file's header is not what we expect (schema change)."""
+    missing = [c for c in expected if c not in df.columns]
+    extra = [c for c in df.columns if c not in expected]
+    if missing or extra:
+        raise ValueError(f"Schema change in {file_name}: missing columns {missing}, unexpected columns {extra}")
 
 
 # ─────────────────────────── 4. DuckDB connection ───────────────────────────

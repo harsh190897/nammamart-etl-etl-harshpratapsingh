@@ -91,7 +91,7 @@ def table_counts(con, tables: list, run_id: str = None) -> dict:
 
 
 def staging_variables(run_id: str, dag_id: str, as_of=None) -> dict:
-    """Run parameters and business rules for the staging SQL, all taken from nammamart_common.py,
+    """Run parameters and business rules for the staging and mart SQL, all taken from nammamart_common.py,
     so the ELT SQL and the ETL Python use exactly the same values (one place to change a rule).
 
     as_of is the Bengaluru time the checks compare with ("is this date in the future?").
@@ -124,4 +124,6 @@ def staging_variables(run_id: str, dag_id: str, as_of=None) -> dict:
         "amount_tolerance": nc.AMOUNT_TOLERANCE,
         "freshness_max_age_hours": nc.FRESHNESS_MAX_AGE_HOURS,
         "volume_drop_warn_pct": nc.VOLUME_DROP_WARN_PCT,
+        "revenue_status": nc.REVENUE_STATUS,
+        "sla_minutes": nc.SLA_MINUTES,
     }

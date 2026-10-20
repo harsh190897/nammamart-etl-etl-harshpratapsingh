@@ -4,14 +4,17 @@ dags/nammamart_elt_harshpratapsingh.py
 NammaMart ELT pipeline (Part B): Extract -> Load raw -> Transform in the warehouse with SQL.
 Every source row is loaded into the raw tables exactly as received; cleaning happens later, in SQL.
 
-Graph so far (B.1 + B.2):
+Graph:
   extract_customers --+
   extract_products  --+
-  extract_stores    --+--> load_raw --> load_raw_increments --> [staging]
+  extract_stores    --+--> load_raw --> load_raw_increments --> [staging] --> [marts] --> audit_run
   extract_orders    --+
   extract_payments  --+
   [staging] = stg_stores -> stg_products -> stg_customers -> stg_orders -> stg_payments
               (one after another: DuckDB allows one writer, and orders are checked against the staged masters)
+  [marts]   = mart_daily_store_kpis -> mart_category_margin -> mart_delivery_sla
+              -> mart_payment_reconciliation -> mart_payment_mode_revenue -> mart_top_customers
+  audit_run runs even if something failed and records the run in pipeline_runs.
 
 Helper code:
   include/nammamart_common.py     paths, constants, DuckDB connection, audit tables (shared with the ETL DAG)
@@ -19,6 +22,7 @@ Helper code:
   include/sql/raw/*.sql           raw layer SQL
   include/sql/common/*.sql        SQL macros (cleaning, masking) and the data quality rule catalog
   include/sql/staging/*.sql       staging layer SQL: types, standardisation, dedupe, masking, quality rules
+  include/sql/marts/*.sql         mart layer SQL: business-ready tables for the six business questions
 """
 import sys
 from datetime import timedelta
@@ -33,6 +37,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "include"))
 DAG_ID = "nammamart_elt_harshpratapsingh"
 
 RAW_TABLES = ["raw_customers", "raw_products", "raw_stores", "raw_orders", "raw_payments"]
+MART_TABLES = ["mart_daily_store_kpis", "mart_category_margin", "mart_delivery_sla",
+               "mart_payment_reconciliation", "mart_payment_mode_revenue", "mart_top_customers"]
 
 
 def _assets(*tables: str) -> list:
@@ -86,6 +92,27 @@ def _run_staging(entity: str) -> dict:
               f"{merge['unchanged']} unchanged")
     return {"table": table, "valid": status.get("VALID", 0), "rejected": status.get("REJECTED", 0),
             "rejected_rows": rejected, "merge": merge}
+
+
+def _run_mart(table: str) -> dict:
+    """Rebuild one mart from the VALID staging rows (include/sql/marts/<table>.sql) and print it."""
+    import nammamart_common as nc
+    from nammamart_elt import run_sql_files, staging_variables
+
+    with nc.get_connection() as con:
+        run_sql_files(con, [f"marts/{table}.sql"], staging_variables(_run_id(), DAG_ID))
+        rows = con.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
+        preview = con.execute(f"SELECT * FROM {table} LIMIT 10").df()
+    print(f"[Mart] {table}: {rows} rows. First rows:\n{preview.to_string(index=False)}")
+    return {"table": table, "rows": int(rows)}
+
+
+def _count(con, sql: str, params: list) -> int:
+    """Row count for the audit; 0 if the table does not exist yet (e.g. the very first run failed early)."""
+    try:
+        return int(con.execute(sql, params).fetchone()[0])
+    except Exception:
+        return 0
 
 
 @dag(
@@ -198,6 +225,67 @@ def nammamart_elt_harshpratapsingh():
         orders, payments = stg_orders(), stg_payments()
         stores >> products >> customers >> orders >> payments
 
+    # ── 5. MARTS: SQL only, business-ready tables, rebuilt on every run ──────────────────────
+    @task(outlets=_assets("mart_daily_store_kpis"))
+    def mart_daily_store_kpis():
+        return _run_mart("mart_daily_store_kpis")
+
+    @task(outlets=_assets("mart_category_margin"))
+    def mart_category_margin():
+        return _run_mart("mart_category_margin")
+
+    @task(outlets=_assets("mart_delivery_sla"))
+    def mart_delivery_sla():
+        return _run_mart("mart_delivery_sla")
+
+    @task(outlets=_assets("mart_payment_reconciliation"))
+    def mart_payment_reconciliation():
+        return _run_mart("mart_payment_reconciliation")
+
+    @task(outlets=_assets("mart_payment_mode_revenue"))
+    def mart_payment_mode_revenue():
+        return _run_mart("mart_payment_mode_revenue")
+
+    @task(outlets=_assets("mart_top_customers"))
+    def mart_top_customers():
+        return _run_mart("mart_top_customers")
+
+    @task_group(group_id="marts")
+    def marts(after):
+        # `after` is the staging group: every mart waits for the whole staging layer.
+        tasks = [mart_daily_store_kpis(), mart_category_margin(), mart_delivery_sla(),
+                 mart_payment_reconciliation(), mart_payment_mode_revenue(), mart_top_customers()]
+        after >> tasks[0]
+        for before, nxt in zip(tasks, tasks[1:]):
+            before >> nxt
+        return tasks[-1]                               # the audit uses the last mart's result
+
+    # ── 6. RUN AUDIT: always runs, records the outcome in pipeline_runs ───────────────────
+    @task(trigger_rule="all_done", retries=0)
+    def audit_run(extracted: list, last_mart):
+        # With trigger_rule="all_done" this task runs even when an upstream task failed.
+        # A failed upstream task has no return value, so its argument arrives as None.
+        import nammamart_common as nc
+
+        ctx = get_current_context()
+        run_id = ctx["run_id"]
+        rows_extracted = sum(f["rows"] for e in extracted if e for f in e["files"])
+        status = "SUCCESS" if last_mart is not None else "FAILED"
+        with nc.get_connection() as con:
+            # ELT loads every row it receives into raw; rejected rows are flagged in staging, not removed
+            rows_loaded = sum(_count(con, f"SELECT count(*) FROM {t} WHERE _run_id = ?", [run_id])
+                              for t in RAW_TABLES)
+            rows_quarantined = _count(con, "SELECT count(*) FROM stg_rejected_rows WHERE _run_id = ?", [run_id])
+            nc.write_pipeline_run(con, run_id, DAG_ID, ctx["dag_run"].start_date, nc.utc_now(),
+                                  rows_extracted, rows_loaded, rows_quarantined, status)
+        removed = nc.cleanup_old_run_dirs()
+        print(f"[Audit] {status}: extracted={rows_extracted} loaded into raw={rows_loaded} "
+              f"rejected in staging={rows_quarantined} (old run folders removed: {removed})")
+        if status == "FAILED":
+            # Fail this task too, otherwise the DAG run would show green even though a step failed.
+            raise RuntimeError("Pipeline failed - see the red task(s) and the pipeline_runs table")
+        return status
+
     # ── Wiring: calling a task with another task's output creates the dependency ──────────
     customers_x = extract_customers()
     products_x = extract_products()
@@ -209,6 +297,8 @@ def nammamart_elt_harshpratapsingh():
     raw_increments = load_raw_increments(orders_x, raw)
     staged = staging()
     raw_increments >> staged
+    last_mart = marts(staged)
+    audit_run([customers_x, products_x, stores_x, orders_x, payments_x], last_mart)
 
 
 nammamart_elt_harshpratapsingh()

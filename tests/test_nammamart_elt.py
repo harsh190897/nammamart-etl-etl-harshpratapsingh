@@ -290,3 +290,114 @@ def test_volume_check_warns_when_orders_drop_by_more_than_90_percent(tmp_path):
                             WHERE run_id = 'run_2' AND check_name = 'orders.volume_vs_previous_run'""").fetchone()
     assert status == (1, "WARN")
     con.close()
+
+
+# ── Mart layer (Part B.3) ─────────────────────────────────────────────────────────────
+MARTS = ["mart_daily_store_kpis", "mart_category_margin", "mart_delivery_sla", "mart_payment_reconciliation",
+         "mart_payment_mode_revenue", "mart_top_customers"]
+
+
+def run_marts(con, run_id="run_1"):
+    for mart in MARTS:
+        elt.run_sql_files(con, [f"marts/{mart}.sql"], elt.staging_variables(run_id, "elt_test", AS_OF))
+
+
+@pytest.fixture(scope="module")
+def marts_and_etl(tmp_path_factory):
+    """ELT marts and the ETL report tables built from the same files, in one database."""
+    import nammamart_etl_checks as ck
+    import nammamart_etl_load as ld
+    import nammamart_etl_transform as tf
+
+    folder = tmp_path_factory.mktemp("marts")
+    con = duckdb.connect(str(folder / "both.duckdb"))
+    load_raw(con, "run_1")
+    run_staging(con, "run_1")
+    run_marts(con)
+
+    raw = {entity: nc.read_text_csv(nc.DATA_DIR / name) for entity, name in nc.SOURCE_FILES.items()}
+    increment = nc.read_text_csv(nc.DATA_DIR / nc.INCREMENT_FILE)
+    customers = ck.validate_customers(raw["customers"], AS_OF)
+    products = ck.validate_products(raw["products"])
+    stores = ck.validate_stores(raw["stores"])
+
+    def ids(df, key):
+        return set(df[key].str.strip())
+
+    refs = {"customer_id": (ids(raw["customers"], "customer_id"), ids(customers.passed, "customer_id")),
+            "product_id": (ids(raw["products"], "product_id"), ids(products.passed, "product_id")),
+            "store_id": (ids(raw["stores"], "store_id"), ids(stores.passed, "store_id"))}
+    orders = ck.validate_orders(raw["orders"], "orders.csv", refs, AS_OF)
+    increment_v = ck.validate_orders(increment, nc.INCREMENT_FILE, refs, AS_OF)
+    payments = ck.validate_payments(raw["payments"], ids(raw["orders"], "order_id") | ids(increment, "order_id"), AS_OF)
+    dim_product = tf.build_dim_product(products.passed)
+    tables = {"etl_dim_customer": tf.build_dim_customer(customers.passed), "etl_dim_product": dim_product,
+              "etl_dim_store": tf.build_dim_store(stores.passed),
+              "etl_fact_orders": tf.build_fact_orders([orders.passed, increment_v.passed], dim_product),
+              "etl_fact_payments": tf.build_payments(payments.passed)}
+    paths = {name: nc.write_parquet(df, folder / f"{name}.parquet") for name, df in tables.items()}
+    ld.load_star_schema(con, paths, "etl_run_1")
+    ld.reconcile(con)
+    ld.build_reports(con)
+    yield con
+    con.close()
+
+
+def rows_only_in_one(con, left: str, right: str) -> int:
+    return con.execute(f"SELECT count(*) FROM (({left} EXCEPT {right}) UNION ALL ({right} EXCEPT {left}))").fetchone()[0]
+
+
+def test_daily_revenue_by_zone_and_store_matches_etl(marts_and_etl):
+    con = marts_and_etl
+    columns = "order_date, zone, store_id, store_name, delivered_orders, net_revenue"
+    assert rows_only_in_one(con, f"SELECT {columns} FROM mart_daily_store_kpis",
+                            f"SELECT {columns} FROM etl_daily_zone_revenue") == 0
+    assert con.execute("SELECT count(*) FROM mart_daily_store_kpis").fetchone()[0] == 459
+
+
+def test_category_margin_matches_etl(marts_and_etl):
+    assert rows_only_in_one(marts_and_etl, "SELECT * FROM mart_category_margin",
+                            "SELECT * FROM etl_category_margin") == 0
+
+
+def test_payment_reconciliation_matches_etl(marts_and_etl):
+    con = marts_and_etl
+    assert rows_only_in_one(con, "SELECT * FROM mart_payment_reconciliation",
+                            "SELECT * FROM etl_payment_reconciliation") == 0
+    assert con.execute("SELECT count(*), round(sum(amount_at_risk), 2) FROM mart_payment_reconciliation"
+                       ).fetchone() == (433, 276928.5)
+
+
+def test_mart_totals_agree_with_each_other_and_with_etl(marts_and_etl):
+    con = marts_and_etl
+
+    def one(sql):
+        return con.execute(sql).fetchone()
+
+    etl_revenue, etl_margin = one("""SELECT round(sum(net_revenue), 2), round(sum(gross_margin), 2)
+                                     FROM etl_fact_orders WHERE order_status = 'DELIVERED'""")
+    assert one("SELECT round(sum(net_revenue), 2), round(sum(gross_margin), 2) FROM mart_daily_store_kpis") == (
+        etl_revenue, etl_margin) == (1128410.45, 277758.4)
+    assert one("SELECT round(sum(revenue), 2) FROM mart_category_margin")[0] == etl_revenue
+    assert one("SELECT round(sum(net_revenue), 2) FROM mart_payment_mode_revenue")[0] == etl_revenue
+    assert one("SELECT round(sum(total_spend), 2) FROM mart_top_customers")[0] == etl_revenue
+    assert one("SELECT round(sum(amount_not_reconciled), 2) FROM mart_payment_mode_revenue")[0] == 276928.5
+    sla = one("SELECT sum(delivered_orders), sum(orders_within_15_min) FROM mart_delivery_sla")
+    etl_sla = one("""SELECT count(*), count(*) FILTER (WHERE within_15_min) FROM etl_fact_orders
+                     WHERE order_status = 'DELIVERED'""")
+    assert sla == etl_sla
+
+
+def test_top_customers_show_no_personal_data(marts_and_etl):
+    columns = {row[0] for row in marts_and_etl.execute("DESCRIBE mart_top_customers").fetchall()}
+    assert not {"full_name", "email", "phone", "email_masked", "phone_masked"} & columns
+    top = marts_and_etl.execute("SELECT spend_rank, name_masked FROM mart_top_customers WHERE spend_rank <= 10").fetchall()
+    assert [r[0] for r in top] == list(range(1, 11))
+    assert all(r[1].endswith("***") for r in top)
+
+
+def test_marts_are_rebuilt_not_appended(marts_and_etl):
+    con = marts_and_etl
+    before = {m: con.execute(f"SELECT count(*) FROM {m}").fetchone()[0] for m in MARTS}
+    run_marts(con)
+    assert {m: con.execute(f"SELECT count(*) FROM {m}").fetchone()[0] for m in MARTS} == before

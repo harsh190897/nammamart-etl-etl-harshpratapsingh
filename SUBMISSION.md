@@ -14,9 +14,9 @@ Status of every item in section 6 of the assignment brief. ✅ done · 🟡 in p
 | # | Checklist item (ASSIGNMENT.md §6) | Status | Where |
 |---|---|---|---|
 | 1 | `dags/nammamart_etl_harshpratapsingh.py`, parsing with no import errors | ✅ Complete (16 tasks), no import errors | [dags/nammamart_etl_harshpratapsingh.py](dags/nammamart_etl_harshpratapsingh.py) |
-| 2 | `dags/nammamart_elt_harshpratapsingh.py`, parsing with no import errors | 🟡 Extract, raw and staging layers done (B.1–B.2), no import errors | [dags/nammamart_elt_harshpratapsingh.py](dags/nammamart_elt_harshpratapsingh.py) |
-| 3 | Helper code in `include/` (quality checks, masking functions) | 🟡 ETL helpers complete (quality rules, masking, transform, load, reconciliation, reports, audit tables); ELT helpers and SQL quality rules and masking macros done | [include/nammamart_common.py](include/nammamart_common.py), [include/nammamart_elt.py](include/nammamart_elt.py), [include/nammamart_etl_checks.py](include/nammamart_etl_checks.py), [include/nammamart_etl_transform.py](include/nammamart_etl_transform.py), [include/nammamart_etl_load.py](include/nammamart_etl_load.py) |
-| 4 | SQL files in `include/sql/` | 🟡 Raw and staging layers done; marts in progress | [include/sql/](include/sql/) |
+| 2 | `dags/nammamart_elt_harshpratapsingh.py`, parsing with no import errors | ✅ Complete (19 tasks: 5 extracts, raw, staging, marts, run audit), no import errors | [dags/nammamart_elt_harshpratapsingh.py](dags/nammamart_elt_harshpratapsingh.py) |
+| 3 | Helper code in `include/` (quality checks, masking functions) | ✅ ETL helpers (quality rules, masking, transform, load, reconciliation, reports, audit tables) and ELT helpers (SQL runner, rule variables) | [include/nammamart_common.py](include/nammamart_common.py), [include/nammamart_elt.py](include/nammamart_elt.py), [include/nammamart_etl_checks.py](include/nammamart_etl_checks.py), [include/nammamart_etl_transform.py](include/nammamart_etl_transform.py), [include/nammamart_etl_load.py](include/nammamart_etl_load.py) |
+| 4 | SQL files in `include/sql/` | ✅ Raw, staging, data quality and mart SQL (16 files) | [include/sql/](include/sql/) |
 | 5 | `SUBMISSION.md`: Data Issues Log (Part 0) | ✅ | [Part 0](#part-0-discovery-and-data-profiling) |
 | 6 | `SUBMISSION.md`: answers to Part C | ✅ Answered, with schedule screenshot | [Part C](#part-c-scheduling) |
 | 7 | `SUBMISSION.md`: governance answers (Part E) | ⬜ | [Part E](#part-e-data-governance) |
@@ -273,7 +273,7 @@ The total of both tables equals the DELIVERED net revenue in `etl_fact_orders` (
 
 ## Part B: ELT pipeline
 
-**Status:** 🟡 in progress. Extract, raw and staging layers complete (B.1–B.2).
+**Status:** ✅ DAG complete (B.1–B.3). B.4 (ETL vs ELT comparison write-up and business questions) in progress.
 
 **DAG:** [`dags/nammamart_elt_harshpratapsingh.py`](dags/nammamart_elt_harshpratapsingh.py), flow **Extract → Load raw → Transform in the warehouse with SQL**. Same schedule settings as the ETL DAG (see [Part C](#part-c-scheduling)).
 **Helper code:** [`include/nammamart_elt.py`](include/nammamart_elt.py) (file snapshot and header check, and a runner that executes `.sql` files in one transaction with the run's parameters). **SQL:** [`include/sql/`](include/sql/).
@@ -282,7 +282,7 @@ The total of both tables equals the DELIVERED net revenue in `etl_fact_orders` (
 |---|---|---|---|
 | B.1 Extract + raw layer | ✅ | `extract_customers`, `extract_products`, `extract_stores`, `extract_orders`, `extract_payments` (parallel), `load_raw`, `load_raw_increments` | [`raw/raw_tables.sql`](include/sql/raw/raw_tables.sql), [`raw/load_raw.sql`](include/sql/raw/load_raw.sql), [`raw/load_raw_increments.sql`](include/sql/raw/load_raw_increments.sql) |
 | B.2 Staging layer + data quality in SQL | ✅ | `staging.stg_stores` → `stg_products` → `stg_customers` → `stg_orders` → `stg_payments` (task group, one after another) | [`common/macros.sql`](include/sql/common/macros.sql), [`common/dq_setup.sql`](include/sql/common/dq_setup.sql), [`staging/stg_*.sql`](include/sql/staging/) |
-| B.3 Mart layer + run audit | ⬜ | | |
+| B.3 Mart layer + run audit | ✅ | `marts.mart_daily_store_kpis` → `mart_category_margin` → `mart_delivery_sla` → `mart_payment_reconciliation` → `mart_payment_mode_revenue` → `mart_top_customers` (task group), `audit_run` | [`marts/mart_*.sql`](include/sql/marts/) |
 | B.4 ETL vs ELT comparison | ⬜ | | |
 
 **Extract (B.1).** Each task copies its source file into the run folder (`include/tmp/harshpratapsingh/<run_id>/elt/extract/`) and checks only the header line with Python's `csv` module. Nothing is parsed or cleaned. `extract_orders` also picks up next-day files matching `orders_*_increment.csv`.
@@ -330,7 +330,28 @@ ELT updates all 10 corrections (one of them is rejected, but staging keeps rejec
 
 Staging tables after a run: `stg_customers` 397 VALID + 3 REJECTED, `stg_products` 142 + 8, `stg_stores` 15 + 0, `stg_orders` 2,313 + 237, `stg_payments` 2,209 + 15.
 
-_Steps B.3–B.4 to be documented as they are completed._
+**Mart layer (B.3), SQL only.** Six business-ready tables, each built by one SQL file in [`include/sql/marts/`](include/sql/marts/) from the **VALID** staging rows only, and rebuilt in full on every run (so they always match staging and never double-count):
+
+| Mart | Grain | Answers | Rows |
+|---|---|---|---|
+| `mart_daily_store_kpis` | day × store: delivered orders, net revenue, gross margin, average delivery minutes, orders and % within 15 minutes | Q1 (daily net revenue by zone and store) | 459 |
+| `mart_category_margin` | category: delivered orders, units, revenue, cost, gross margin, margin % | Q2 | 6 |
+| `mart_delivery_sla` | store: delivered orders, average / fastest / slowest delivery, orders and % within 15 minutes | Q3 | 15 |
+| `mart_payment_reconciliation` | one row per order/payment mismatch, with reason and amount at risk (same rules as ETL) | Q4, acceptance criterion 7 | 433 |
+| `mart_payment_mode_revenue` | payment mode: delivered orders, net revenue, mismatches, amount not reconciled | Q4 | 4 |
+| `mart_top_customers` | customer: spend rank, masked name, loyalty tier, city, delivered orders, total spend (no email or phone) | Q5 | 396 |
+
+`mart_payment_mode_revenue` is one extra mart beyond the five in the brief: none of the five has a payment-mode breakdown, and it makes Q4 a single simple query. Q6 (rows rejected today, by file and reason) is answered from `stg_rejected_rows`.
+
+**Same numbers as ETL.** A unit test builds the ETL report tables and the ELT marts from the same files in one database and checks them row by row: `mart_daily_store_kpis` equals `etl_daily_zone_revenue` (all 459 day × store rows), `mart_category_margin` equals `etl_category_margin`, and `mart_payment_reconciliation` equals `etl_payment_reconciliation` (433 mismatches, ₹276,928.50 at risk). Net revenue (₹1,128,410.45), gross margin (₹277,758.40) and the 15-minute SLA counts are the same in both pipelines, and every mart adds up to the same revenue.
+
+**Run audit (B.3).** `audit_run` (`trigger_rule="all_done"`) writes one row per run to `pipeline_runs`, like the ETL DAG. In ELT `rows_loaded` is the number of rows written to the raw tables: ELT loads **every** row it receives (5,372), and `rows_quarantined` is the number of rows rejected in staging (287, listed in `stg_rejected_rows`). If the marts were not built, the audit records `FAILED` and fails itself, so the run is shown as failed.
+
+**Both DAGs at 09:00.** The two DAGs write to the same DuckDB file, which allows one writer at a time. When both were started together, the ELT DAG found the warehouse locked once, waited and retried (`get_connection` retries for up to 30 seconds), and both runs succeeded with their own `dq_results` and `pipeline_runs` rows.
+
+**Assets.** The DAG publishes 17 tables as Airflow Assets in group `nammamart_elt` (5 raw, 5 staging, `stg_rejected_rows`, 6 marts), so the Assets page shows every ELT table and the task that produces it.
+
+_Step B.4 (ETL vs ELT comparison for September and the six business questions) to be documented when completed._
 
 ---
 
@@ -474,7 +495,15 @@ ETL examples from testing on 2026-10-20:
 
 ![Query result: pipeline_runs](docs/screenshots/06_pipeline_runs.png)
 
-_ELT rows to be added in Part B._
+ELT examples from testing on 2026-10-20:
+
+| Run | status | rows_extracted | rows_loaded | rows_quarantined | Duration |
+|---|---|---|---|---|---|
+| Normal run | SUCCESS | 5,372 | 5,372 | 287 | 2.8 s |
+| Re-run, same files | SUCCESS | 5,372 | 5,372 | 287 | 2.7 s |
+| `products.csv` missing | FAILED | 5,220 | 0 | 0 | 135 s (2 retries of 1 minute) |
+
+In ELT `rows_loaded` = `rows_extracted`: every row is loaded into raw, and the 287 rejected rows are flagged in staging instead of being removed.
 
 ### Experiments
 

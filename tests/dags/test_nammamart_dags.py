@@ -42,3 +42,16 @@ def test_etl_task_order(dagbag):
     assert upstream(dag, "load") == {"transform", "quarantine_and_log_dq"}
     assert upstream(dag, "audit_run") >= {"load", "report", "quarantine_and_log_dq"}
     assert dag.get_task("audit_run").trigger_rule == "all_done"
+
+
+def test_elt_marts_and_audit_order(dagbag):
+    dag = dagbag.get_dag("nammamart_elt_harshpratapsingh")
+    chain = ["staging.stg_payments", "marts.mart_daily_store_kpis", "marts.mart_category_margin",
+             "marts.mart_delivery_sla", "marts.mart_payment_reconciliation", "marts.mart_payment_mode_revenue",
+             "marts.mart_top_customers"]
+    for before, after in zip(chain, chain[1:]):
+        assert upstream(dag, after) == {before}, f"{after} must wait for {before}"
+    audit = dag.get_task("audit_run")
+    assert audit.trigger_rule == "all_done"
+    assert "marts.mart_top_customers" in audit.upstream_task_ids
+    assert {f"extract_{e}" for e in ("customers", "products", "stores", "orders", "payments")} <= audit.upstream_task_ids

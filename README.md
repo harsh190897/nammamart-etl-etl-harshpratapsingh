@@ -23,11 +23,11 @@ Both write to a local DuckDB warehouse and record every quality check (`dq_resul
 |---|---|
 | 0. Data profiling and issues log | ✅ Done |
 | A. ETL pipeline | ✅ Done (16 tasks: extract, validate, quarantine, transform, load, reconcile, report, run audit) |
-| B. ELT pipeline | 🟡 Extract, raw and staging layers done (same 110 checks and 287 rejected rows as ETL); marts in progress |
+| B. ELT pipeline | ✅ Done (19 tasks: raw, staging, marts, run audit; same checks, rejected rows and totals as ETL). Business-question write-up in progress |
 | C. Scheduling | ✅ Answered (ETL) |
 | D. Data quality dimensions | ✅ 110 checks across all 6 dimensions, in Python (ETL) and SQL (ELT), written to `dq_results` every run |
 | E. Data governance | ⬜ Not started |
-| F. Observability tests | 🟡 Run audit (`pipeline_runs`) done for ETL; experiments not started |
+| F. Observability tests | 🟡 Run audit (`pipeline_runs`) done for both DAGs; experiments not started |
 | G. Recommendation | ⬜ Not started |
 
 ## Project structure
@@ -48,6 +48,7 @@ include/
   sql/raw/                            ELT raw layer: table definitions, load_raw, load_raw_increments
   sql/common/                         ELT SQL macros (cleaning, masking) and the data quality rule catalog
   sql/staging/                        ELT staging layer: one SQL file per table (types, dedupe, masking, quality rules, MERGE)
+  sql/marts/                          ELT mart layer: one SQL file per business-ready table
   quarantine/harshpratapsingh/        rejected rows with failure_reason (generated, not committed)
   tmp/harshpratapsingh/               per-run working files (generated, not committed)
   warehouse_harshpratapsingh.duckdb   DuckDB warehouse (generated, not committed)

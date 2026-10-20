@@ -23,7 +23,7 @@ Both write to a local DuckDB warehouse and record every quality check (`dq_resul
 |---|---|
 | 0. Data profiling and issues log | ✅ Done |
 | A. ETL pipeline | ✅ Done (16 tasks: extract, validate, quarantine, transform, load, reconcile, report, run audit) |
-| B. ELT pipeline | ⬜ Not started |
+| B. ELT pipeline | 🟡 Extract and raw layer done; staging and marts in progress |
 | C. Scheduling | ✅ Answered (ETL) |
 | D. Data quality dimensions | 🟡 ETL checks done (110 checks, all 6 dimensions); ELT checks in Part B |
 | E. Data governance | ⬜ Not started |
@@ -35,6 +35,7 @@ Both write to a local DuckDB warehouse and record every quality check (`dq_resul
 ```
 dags/
   nammamart_etl_harshpratapsingh.py   ETL DAG
+  nammamart_elt_harshpratapsingh.py   ELT DAG
   meridian_pipeline.py                trainer's reference DAG (unchanged)
   exampledag.py                       Astro example DAG (unchanged)
 include/
@@ -42,8 +43,9 @@ include/
   nammamart_etl_checks.py             ETL data quality rules (pandas): passed / quarantined rows + dq_results
   nammamart_etl_transform.py          ETL transform (pandas): standardise, mask PII, join, derive measures
   nammamart_etl_load.py               ETL load, reconciliation and reports (DuckDB SQL)
+  nammamart_elt.py                    ELT helpers: file snapshot + header check, run .sql files with run parameters
   data/nammamart/                     source CSV files (copied from assignment/nammamart_dataset, never edited)
-  sql/                                ELT SQL files (Part B)
+  sql/raw/                            ELT raw layer: table definitions, load_raw, load_raw_increments
   quarantine/harshpratapsingh/        rejected rows with failure_reason (generated, not committed)
   tmp/harshpratapsingh/               per-run working files (generated, not committed)
   warehouse_harshpratapsingh.duckdb   DuckDB warehouse (generated, not committed)
@@ -60,6 +62,7 @@ docs/screenshots/                     screenshots referenced in SUBMISSION.md
 astro dev start                                          # start Airflow in Docker; UI at http://localhost:8080
 astro dev run dags list-import-errors                    # check that the DAGs parse
 astro dev run dags test nammamart_etl_harshpratapsingh   # run the ETL DAG once from the terminal
+astro dev run dags test nammamart_elt_harshpratapsingh   # run the ELT DAG once from the terminal
 astro dev pytest                                         # run all tests inside the Airflow container
 astro dev stop
 ```
@@ -73,7 +76,7 @@ python3 -m venv .venv && source .venv/bin/activate
 pip install pandas duckdb pytest
 python profiling/profile_files.py > profiling/profile_output.txt
 python profiling/find_issues.py
-pytest tests/test_nammamart_common.py tests/test_nammamart_etl.py -v
+pytest tests/test_nammamart_common.py tests/test_nammamart_etl.py tests/test_nammamart_elt.py -v
 ```
 
 ## Data and privacy

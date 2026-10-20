@@ -14,9 +14,9 @@ Status of every item in section 6 of the assignment brief. ✅ done · 🟡 in p
 | # | Checklist item (ASSIGNMENT.md §6) | Status | Where |
 |---|---|---|---|
 | 1 | `dags/nammamart_etl_harshpratapsingh.py`, parsing with no import errors | ✅ Complete (16 tasks), no import errors | [dags/nammamart_etl_harshpratapsingh.py](dags/nammamart_etl_harshpratapsingh.py) |
-| 2 | `dags/nammamart_elt_harshpratapsingh.py`, parsing with no import errors | ⬜ | Part B |
+| 2 | `dags/nammamart_elt_harshpratapsingh.py`, parsing with no import errors | 🟡 Extract and raw layer done (B.1), no import errors | [dags/nammamart_elt_harshpratapsingh.py](dags/nammamart_elt_harshpratapsingh.py) |
 | 3 | Helper code in `include/` (quality checks, masking functions) | 🟡 ETL helpers complete (quality rules, masking, transform, load, reconciliation, reports, audit tables); ELT helpers in Part B | [include/nammamart_common.py](include/nammamart_common.py), [include/nammamart_etl_checks.py](include/nammamart_etl_checks.py), [include/nammamart_etl_transform.py](include/nammamart_etl_transform.py), [include/nammamart_etl_load.py](include/nammamart_etl_load.py) |
-| 4 | SQL files in `include/sql/` | ⬜ | Part B |
+| 4 | SQL files in `include/sql/` | 🟡 Raw layer done; staging and marts in progress | [include/sql/](include/sql/) |
 | 5 | `SUBMISSION.md`: Data Issues Log (Part 0) | ✅ | [Part 0](#part-0-discovery-and-data-profiling) |
 | 6 | `SUBMISSION.md`: answers to Part C | ✅ Answered, with schedule screenshot | [Part C](#part-c-scheduling) |
 | 7 | `SUBMISSION.md`: governance answers (Part E) | ⬜ | [Part E](#part-e-data-governance) |
@@ -273,9 +273,32 @@ The total of both tables equals the DELIVERED net revenue in `etl_fact_orders` (
 
 ## Part B: ELT pipeline
 
-**Status:** ⬜ not started.
+**Status:** 🟡 in progress. Extract and raw layer complete (B.1).
 
-_To be completed._
+**DAG:** [`dags/nammamart_elt_harshpratapsingh.py`](dags/nammamart_elt_harshpratapsingh.py), flow **Extract → Load raw → Transform in the warehouse with SQL**. Same schedule settings as the ETL DAG (see [Part C](#part-c-scheduling)).
+**Helper code:** [`include/nammamart_elt.py`](include/nammamart_elt.py) (file snapshot and header check, and a runner that executes `.sql` files in one transaction with the run's parameters). **SQL:** [`include/sql/`](include/sql/).
+
+| Step | Status | Tasks | SQL |
+|---|---|---|---|
+| B.1 Extract + raw layer | ✅ | `extract_customers`, `extract_products`, `extract_stores`, `extract_orders`, `extract_payments` (parallel), `load_raw`, `load_raw_increments` | [`raw/raw_tables.sql`](include/sql/raw/raw_tables.sql), [`raw/load_raw.sql`](include/sql/raw/load_raw.sql), [`raw/load_raw_increments.sql`](include/sql/raw/load_raw_increments.sql) |
+| B.2 Staging layer + data quality in SQL | ⬜ | | |
+| B.3 Mart layer + run audit | ⬜ | | |
+| B.4 ETL vs ELT comparison | ⬜ | | |
+
+**Extract (B.1).** Each task copies its source file into the run folder (`include/tmp/harshpratapsingh/<run_id>/elt/extract/`) and checks only the header line with Python's `csv` module. Nothing is parsed or cleaned. `extract_orders` also picks up next-day files matching `orders_*_increment.csv`.
+
+**Raw layer (B.1).** `load_raw` loads the five files into `raw_customers`, `raw_products`, `raw_stores`, `raw_orders` and `raw_payments` with DuckDB SQL, in one transaction:
+
+- Every column is read and stored as **text** (`read_csv(..., all_varchar = true)`); empty cells stay empty strings. A unit test compares every cell of every raw table with its source file, so the raw tables are an **exact copy**, bad rows included (for example `payment_mode = 'UPI '` with the trailing space, `order_ts = 'N/A'`, 18 empty `customer_id`).
+- Four metadata columns are added: `_source_file`, `_source_row` (CSV line number, header = line 1), `_run_id` and `_loaded_at` (UTC). Together they trace any row back to the exact file line and the run that loaded it.
+- Columns are matched by name (`INSERT ... BY NAME`), so a renamed or missing column fails the task with a clear error, and the transaction loads nothing.
+- Raw is **append-only**: every run adds its own batch, and nothing is ever updated or deleted. Each file is loaded only once per run, so a retried or cleared task never duplicates a batch. Staging reads only the current run's batch, so the growth of raw never double-counts anything.
+
+**Incremental load, raw step (B.1).** `load_raw_increments` is a separate step that **appends** `orders_2026-10-01_increment.csv` to `raw_orders`, keeping its own `_source_file`. If there is no increment file, the step logs that and succeeds.
+
+Result of a run on 2026-10-20 (rows per run): `raw_customers` 405, `raw_products` 152, `raw_stores` 15, `raw_orders` 2,412 + 160 (increment), `raw_payments` 2,228. A second run with the same files appends a second batch of the same size (`raw_orders` 2,572 → 5,144 rows in total).
+
+_Steps B.2–B.4 to be documented as they are completed._
 
 ---
 

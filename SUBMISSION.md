@@ -22,7 +22,7 @@ Status of every item in section 6 of the assignment brief. ✅ done · 🟡 in p
 | 7 | `SUBMISSION.md`: governance answers (Part E) | ⬜ | [Part E](#part-e-data-governance) |
 | 8 | `SUBMISSION.md`: observability results table (Part F) | ⬜ | [Part F](#part-f-observability-tests) |
 | 9 | `SUBMISSION.md`: recommendation (Part G) | ⬜ | [Part G](#part-g-recommendation-to-the-cto) |
-| 10 | Screenshots: both DAGs green in Graph view, 9:00 AM IST schedule, one quarantine file, `dq_results`, `pipeline_runs`, payment reconciliation | 🟡 6 of 7 (ELT graph pending, Part B) | [Screenshots](#screenshots) |
+| 10 | Screenshots: both DAGs green in Graph view, 9:00 AM IST schedule, one quarantine file, `dq_results`, `pipeline_runs`, payment reconciliation | ✅ 7 of 7 | [Screenshots](#screenshots) |
 | 11 | Six business questions, SQL + result, from both pipelines | ✅ All six answered from both pipelines; results identical | [Business questions](#business-questions) |
 | 12 | No API keys, passwords, webhook URLs or unmasked customer data outside `include/data/` | ✅ Checked on every commit | [.gitignore](.gitignore) |
 
@@ -285,6 +285,10 @@ The total of both tables equals the DELIVERED net revenue in `etl_fact_orders` (
 | B.3 Mart layer + run audit | ✅ | `marts.mart_daily_store_kpis` → `mart_category_margin` → `mart_delivery_sla` → `mart_payment_reconciliation` → `mart_payment_mode_revenue` → `mart_top_customers` (task group), `audit_run` | [`marts/mart_*.sql`](include/sql/marts/) |
 | B.4 ETL vs ELT comparison | ✅ | [`analysis/business_questions.py`](analysis/business_questions.py) | [`analysis/sql/`](analysis/sql/) |
 
+Green run in the Airflow UI (Graph view, `staging` and `marts` task groups expanded, all 19 tasks `success`):
+
+![ELT DAG in Graph view, green run](docs/screenshots/02_elt_graph_green.png)
+
 **Extract (B.1).** Each task copies its source file into the run folder (`include/tmp/harshpratapsingh/<run_id>/elt/extract/`) and checks only the header line with Python's `csv` module. Nothing is parsed or cleaned. `extract_orders` also picks up next-day files matching `orders_*_increment.csv`.
 
 **Raw layer (B.1).** `load_raw` loads the five files into `raw_customers`, `raw_products`, `raw_stores`, `raw_orders` and `raw_payments` with DuckDB SQL, in one transaction:
@@ -373,9 +377,9 @@ Every zone matches as well (see the [business questions](#business-questions) se
 
 **Status:** ✅ answered for the ETL DAG; the ELT DAG will use the same settings.
 
-DAG page in the Airflow UI (display timezone +05:30): schedule `0 9 * * 1-6`, next run `2026-10-21 09:00:00` IST.
+Both DAGs in the Airflow UI (display timezone +05:30, bottom-left): schedule `0 9 * * 1-6`, next run `2026-10-21 09:00:00` IST.
 
-![ETL DAG schedule: 0 9 * * 1-6, next run 2026-10-21 09:00 IST](docs/screenshots/03_schedule_9am_ist.png)
+![ETL and ELT DAG schedule: 0 9 * * 1-6, next run 2026-10-21 09:00 IST](docs/screenshots/03_schedule_9am_ist.png)
 
 | Setting | Value | Why |
 |---|---|---|
@@ -422,9 +426,9 @@ The scheduler is not running, so nothing runs at 09:00 and the numbers are not r
 
 Result of a run on 2026-10-20: **110 checks**, all 6 dimensions, **29 FAIL, 14 WARN, 67 PASS**. The failure counts match the [Data Issues Log](#05-data-issues-log) exactly (verified by [`tests/test_nammamart_etl.py`](tests/test_nammamart_etl.py)).
 
-Query result: the `dq_results` scorecard per run, and the checks that did not pass in the latest run:
+Query result: the `dq_results` scorecard of every run of both DAGs, and the latest run of each DAG by quality dimension (ETL and ELT identical):
 
-![Query result: dq_results scorecard per run and failing checks](docs/screenshots/05_dq_results.png)
+![Query result: dq_results scorecard per run and per dimension, both pipelines](docs/screenshots/05_dq_results.png)
 
 **ELT checks (SQL, [`include/sql/common/dq_setup.sql`](include/sql/common/dq_setup.sql) + [`include/sql/staging/`](include/sql/staging/))**
 
@@ -938,7 +942,7 @@ ETL examples from testing on 2026-10-20:
 
 `rows_loaded` counts the rows written to the star schema (dimensions, payments and the batch of fact orders). `rows_extracted` = `rows_loaded` + `rows_quarantined` + 9, because 9 rows of the increment file replace an older version of the same order.
 
-![Query result: pipeline_runs](docs/screenshots/06_pipeline_runs.png)
+![Query result: pipeline_runs for both pipelines](docs/screenshots/06_pipeline_runs.png)
 
 ELT examples from testing on 2026-10-20:
 
@@ -1006,7 +1010,7 @@ Stored in [`docs/screenshots/`](docs/screenshots/).
 | # | Required screenshot | File | Status |
 |---|---|---|---|
 | 1 | ETL DAG in Graph view, green run | [`docs/screenshots/01_etl_graph_green.png`](docs/screenshots/01_etl_graph_green.png) | ✅ |
-| 2 | ELT DAG in Graph view, green run | `docs/screenshots/02_elt_graph_green.png` | ⬜ |
+| 2 | ELT DAG in Graph view, green run | [`docs/screenshots/02_elt_graph_green.png`](docs/screenshots/02_elt_graph_green.png) | ✅ |
 | 3 | Schedule showing 9:00 AM IST and the next run | [`docs/screenshots/03_schedule_9am_ist.png`](docs/screenshots/03_schedule_9am_ist.png) | ✅ |
 | 4 | One quarantine file | [`docs/screenshots/04_quarantine_file.png`](docs/screenshots/04_quarantine_file.png) | ✅ |
 | 5 | Query result: `dq_results` | [`docs/screenshots/05_dq_results.png`](docs/screenshots/05_dq_results.png) | ✅ |
@@ -1015,5 +1019,7 @@ Stored in [`docs/screenshots/`](docs/screenshots/).
 
 Screenshots of tables must not show unmasked customer data. All screenshots above were checked: none shows a name, email or phone number (the quarantine screenshot uses the orders file, which only contains customer IDs).
 
-- **#3** shows the DAG header: schedule `0 9 * * 1-6` and next run `2026-10-21 09:00:00`. The Airflow UI is set to the +05:30 (IST) display timezone, so the next run is shown in IST. Airflow stores it as 03:30 UTC (see [Part C](#part-c-scheduling)).
-- **#5** and **#6** currently show ETL runs only; they will be retaken after Part B so that they include the ELT DAG's rows as well.
+- **#2** shows all 19 ELT tasks green, with the `staging` and `marts` task groups expanded.
+- **#3** shows both DAGs (filtered by the `nammamart` tag) with schedule `0 9 * * 1-6` and next run `2026-10-21 09:00:00`. The Airflow UI is set to the +05:30 (IST) display timezone (bottom-left), so the next run is shown in IST. Airflow stores it as 03:30 UTC (see [Part C](#part-c-scheduling)).
+- **#5** shows the `dq_results` scorecard of every run of both DAGs (110 checks across 6 dimensions each) and, for the latest run of each DAG, the results per quality dimension: ETL and ELT are identical on every line.
+- **#6** shows `pipeline_runs` for both DAGs: ETL loads 5,076 rows (rejected rows go to quarantine files), ELT loads all 5,372 rows into raw and flags the 287 rejected ones in staging.

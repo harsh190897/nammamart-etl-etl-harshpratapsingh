@@ -13,9 +13,9 @@ Status of every item in section 6 of the assignment brief. ✅ done · 🟡 in p
 
 | # | Checklist item (ASSIGNMENT.md §6) | Status | Where |
 |---|---|---|---|
-| 1 | `dags/nammamart_etl_harshpratapsingh.py`, parsing with no import errors | 🟡 Extract step done (A.1) | [dags/nammamart_etl_harshpratapsingh.py](dags/nammamart_etl_harshpratapsingh.py) |
+| 1 | `dags/nammamart_etl_harshpratapsingh.py`, parsing with no import errors | 🟡 Extract, validate and quarantine done (A.1–A.2) | [dags/nammamart_etl_harshpratapsingh.py](dags/nammamart_etl_harshpratapsingh.py) |
 | 2 | `dags/nammamart_elt_harshpratapsingh.py`, parsing with no import errors | ⬜ | Part B |
-| 3 | Helper code in `include/` (quality checks, masking functions) | 🟡 Masking, audit tables, extract helpers done | [include/nammamart_common.py](include/nammamart_common.py) |
+| 3 | Helper code in `include/` (quality checks, masking functions) | 🟡 Masking, audit tables, extract helpers and ETL quality rules done | [include/nammamart_common.py](include/nammamart_common.py), [include/nammamart_etl_checks.py](include/nammamart_etl_checks.py) |
 | 4 | SQL files in `include/sql/` | ⬜ | Part B |
 | 5 | `SUBMISSION.md`: Data Issues Log (Part 0) | ✅ | [Part 0](#part-0-discovery-and-data-profiling) |
 | 6 | `SUBMISSION.md`: answers to Part C | ✅ Answered; screenshot pending | [Part C](#part-c-scheduling) |
@@ -166,20 +166,36 @@ Three proposed severities in the log above were changed from Critical to Warning
 
 ## Part A: ETL pipeline
 
-**Status:** 🟡 in progress. Extract step complete (A.1).
+**Status:** 🟡 in progress. Extract, validate and quarantine complete (A.1–A.2).
 
 **DAG:** [`dags/nammamart_etl_harshpratapsingh.py`](dags/nammamart_etl_harshpratapsingh.py), flow **Extract → Validate → Transform → Load**.
+**Helper code:** [`include/nammamart_common.py`](include/nammamart_common.py) (paths, business rules, DuckDB connection, masking, audit tables), [`include/nammamart_etl_checks.py`](include/nammamart_etl_checks.py) (data quality rules in pandas).
 
 | Step | Status | Tasks |
 |---|---|---|
 | A.1 Extract | ✅ | `extract_customers`, `extract_products`, `extract_stores`, `extract_orders`, `extract_payments` (run in parallel) |
-| A.2 Validate + quarantine | ⬜ | |
+| A.2 Validate + quarantine | ✅ | `validate_customers`, `validate_products`, `validate_stores`, `validate_orders`, `validate_payments`, `quarantine_and_log_dq` |
 | A.3 Transform + load (star schema) | ⬜ | |
 | A.4 Reconcile, report, run audit | ⬜ | |
 
 **Extract (A.1).** Each task copies its source file into a per-run folder (`include/tmp/harshpratapsingh/<run_id>/extract/`), reads it as text, checks the header against the expected columns, and passes only the file path and row count to the next task. `extract_orders` also picks up every next-day file matching `orders_*_increment.csv`.
 
-_Remaining steps to be documented as they are completed._
+**Validate (A.2).** Every file is checked row by row with the rules in [Part D](#part-d-data-quality-dimensions). A row that fails any **Critical** check is set aside with a `failure_reason` listing every rule it broke; **Warning** checks are only counted. The three master files are validated first, because an order is only valid if its customer, product and store exist **and** passed their own checks. Payments only need the order IDs from the orders files, so `validate_payments` runs in parallel with the master validations.
+
+**Quarantine (A.2).** `quarantine_and_log_dq` writes the failed rows of each file, exactly as received plus `source_file`, `source_row` and `failure_reason`, to `include/quarantine/harshpratapsingh/<file>_failed_<run_id>.csv`, and writes every check to `dq_results`. It is the only task in this step that writes to the warehouse, so DuckDB never has two writers.
+
+Result of a run on 2026-10-20:
+
+| File | Rows | Passed | Quarantined | Main reasons |
+|---|---|---|---|---|
+| `customers.csv` | 405 | 397 | 8 | 5 duplicate `customer_id`, 3 future `signup_date` |
+| `products.csv` | 152 | 142 | 10 | 2 duplicate `(old)` rows, 3 missing category, 5 cost > mrp, 1 mrp ≤ 0 |
+| `stores.csv` | 15 | 15 | 0 | S07's missing zone is a Warning (see 0.7) |
+| `orders.csv` | 2,412 | 2,177 | 235 | 126 point to a quarantined product, 18 missing customer, 18 amount ≠ formula, 12 duplicates, … |
+| `orders_2026-10-01_increment.csv` | 160 | 145 | 15 | 14 point to a quarantined product, 1 to a quarantined customer |
+| `payments.csv` | 2,228 | 2,209 | 19 | 4 duplicates, 6 negative amounts, 7 future-dated, 2 unknown mode `Cashh` |
+
+_Steps A.3 and A.4 to be documented as they are completed._
 
 ---
 
@@ -223,18 +239,24 @@ The scheduler is not running, so nothing runs at 09:00 and the numbers are not r
 
 ## Part D: Data quality dimensions
 
-**Status:** ⬜ not started. Checks are written to the `dq_results` table on every run.
+**Status:** 🟡 ETL checks done; ELT checks to be added in Part B.
 
-| Dimension | ETL checks (Python) | ELT checks (SQL) | Severity |
-|---|---|---|---|
-| Completeness | | | |
-| Uniqueness | | | |
-| Validity | | | |
-| Accuracy | | | |
-| Consistency | | | |
-| Timeliness | | | |
+**Critical** = the row is quarantined with a `failure_reason`. **Warning** = the row is loaded and the problem is counted. Every check, of either severity, writes one row to `dq_results` on every run (`run_id`, `dag_id`, `check_name`, `dimension`, `severity`, `rows_checked`, `rows_failed`, `status`, `checked_at`); `status` is PASS, WARN (Warning check with failures) or FAIL (Critical check with failures). Check names are `<file>.<rule>`, for example `orders.order_amount_matches_formula`.
 
-_To be completed._
+**ETL checks (Python, [`include/nammamart_etl_checks.py`](include/nammamart_etl_checks.py))**
+
+| Dimension | Critical (quarantine) | Warning (load + log) |
+|---|---|---|
+| Completeness | Key not missing in all 5 files; order `customer_id`, `order_ts`, `quantity`, `unit_price`, `discount_pct`, `order_amount`; DELIVERED order has `delivery_minutes`; payment `order_id` | Missing `email` or `city`; store `zone`; online SUCCESS payment without `gateway_ref`; orders volume dropped > 90% vs the previous run |
+| Uniqueness | `order_id`, `payment_id`, `customer_id`, `product_id`, `store_id` (first copy kept, later copies quarantined) | — |
+| Validity | `order_ts`, `payment_ts` (`YYYY-MM-DD HH:MM:SS`) and `signup_date` (`YYYY-MM-DD`) parse; `order_status` and `payment_status` in the allowed lists; `payment_mode` maps to UPI / Card / Cash on Delivery / Wallet; numeric columns are numbers; whole-number `quantity`; `discount_pct` 0–100; known `loyalty_tier` | Status or mode needed standardising (`delivered`, `upi`, `UPI `, `cod`); email format; phone 10 digits; pincode 6 digits; `channel` App/Web; `is_active` Y/N; `is_perishable` True/False |
+| Accuracy | `quantity` > 0; `unit_price` > 0; `order_amount` = quantity × unit_price × (1 − discount/100) within ₹0.01; `order_amount` ≥ 0; `delivery_minutes` ≤ 120; `mrp` > 0; `cost_price` ≤ `mrp`; `amount_paid` ≥ 0 | `delivery_minutes` outside 8–35; store capacity ≤ 0 |
+| Consistency | Order's `customer_id`, `product_id`, `store_id` exist in the master file **and** point to a master row that passed its own checks | `loyalty_tier` casing; payment for an order not in the orders files (listed in reconciliation) |
+| Timeliness | No future `order_ts`, `payment_ts` or `signup_date` (compared with Bengaluru time) | Freshness: newest order older than 24 hours |
+
+Result of a run on 2026-10-20: **110 checks**, all 6 dimensions, **29 FAIL, 14 WARN, 67 PASS**. The failure counts match the [Data Issues Log](#05-data-issues-log) exactly (verified by [`tests/test_nammamart_etl.py`](tests/test_nammamart_etl.py)).
+
+**ELT checks (SQL):** _to be completed in Part B._
 
 ---
 

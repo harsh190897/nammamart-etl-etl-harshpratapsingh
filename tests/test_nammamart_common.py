@@ -168,3 +168,9 @@ def test_run_dir_is_created_per_run(tmp_path, monkeypatch):
     assert folder.is_dir()
     assert folder == tmp_path / "tmp" / "manual__2026-10-20T07_35_00_00_00" / "extract"
 
+
+
+# ── Missing values (Part A.2) ─────────────────────────────────────────
+def test_is_missing_treats_placeholders_as_blank():
+    values = pd.Series(["", "  ", "N/A", "null", "-", None, "C00001", "0"])
+    assert nc.is_missing(values).tolist() == [True, True, True, True, True, True, False, False]

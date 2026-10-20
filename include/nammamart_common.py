@@ -76,10 +76,21 @@ PAYMENT_MODE_MAP = {
     "WALLET": "Wallet",
 }
 LOYALTY_TIERS = ("Bronze", "Silver", "Gold", "Platinum")
+VALID_PAYMENT_STATUS = ("SUCCESS", "FAILED", "REFUNDED")
+VALID_ZONES = ("North", "South", "East", "West")
+VALID_CHANNELS = ("App", "Web")
+UNKNOWN = "Unknown"                 # shown when a Warning-level value is missing (e.g. a store's zone)
 MAX_DELIVERY_MINUTES = 120          # above this = impossible (Critical)
 NORMAL_DELIVERY_RANGE = (8, 35)     # outside this = unusual (Warning)
 SLA_MINUTES = 15                    # "within_15_min" KPI
 AMOUNT_TOLERANCE = 0.01             # rupees allowed between recomputed and reported amount
+# Text that means "no value" (same list as the profiling scripts). Compared after TRIM + UPPER.
+MISSING_VALUES = ("", "NULL", "NONE", "NAN", "N/A", "NA", "NIL", "-")
+TIMESTAMP_FORMAT = "%Y-%m-%d %H:%M:%S"
+DATE_FORMAT = "%Y-%m-%d"
+LOCAL_TZ = "Asia/Kolkata"           # source timestamps are Bengaluru local time
+FRESHNESS_MAX_AGE_HOURS = 24        # Warning if the newest order is older than this
+VOLUME_DROP_WARN_PCT = 90           # Warning if orders volume drops by more than this vs the previous run
 
 DQ_DIMENSIONS = ("Completeness", "Uniqueness", "Validity", "Accuracy", "Consistency", "Timeliness")
 DQ_SEVERITIES = ("Critical", "Warning")
@@ -88,6 +99,11 @@ DQ_SEVERITIES = ("Critical", "Warning")
 def utc_now() -> datetime:
     """Current time in UTC, without tzinfo. All audit timestamps are stored in UTC, like Airflow."""
     return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def local_now() -> pd.Timestamp:
+    """Current Bengaluru time, without tzinfo, to compare with source timestamps (which are local time)."""
+    return pd.Timestamp.now(tz=LOCAL_TZ).tz_localize(None)
 
 
 def to_utc_naive(value):
@@ -122,6 +138,11 @@ def run_dir(run_id: str, *parts: str) -> Path:
 def read_text_csv(path) -> pd.DataFrame:
     """Read a CSV with every column as text, exactly as received (same rule as the profiling scripts)."""
     return pd.read_csv(path, dtype=str, keep_default_na=False)
+
+
+def is_missing(series: pd.Series) -> pd.Series:
+    """True where the value is blank or a placeholder such as 'N/A' or 'NULL'."""
+    return series.fillna("").astype(str).str.strip().str.upper().isin(MISSING_VALUES)
 
 
 def check_columns(df: pd.DataFrame, expected: list, file_name: str) -> None:

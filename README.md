@@ -22,10 +22,10 @@ Both write to a local DuckDB warehouse and record every quality check (`dq_resul
 | Part | Status |
 |---|---|
 | 0. Data profiling and issues log | ✅ Done |
-| A. ETL pipeline | 🟡 Extract step done; validate, transform, load in progress |
+| A. ETL pipeline | 🟡 Extract, validate and quarantine done; transform, load, reconcile in progress |
 | B. ELT pipeline | ⬜ Not started |
 | C. Scheduling | ✅ Answered (ETL) |
-| D. Data quality dimensions | ⬜ Not started |
+| D. Data quality dimensions | 🟡 ETL checks done (110 checks, all 6 dimensions); ELT checks in Part B |
 | E. Data governance | ⬜ Not started |
 | F. Observability tests | ⬜ Not started |
 | G. Recommendation | ⬜ Not started |
@@ -39,6 +39,7 @@ dags/
   exampledag.py                       Astro example DAG (unchanged)
 include/
   nammamart_common.py                 shared paths, business rules, DuckDB connection, PII masking, audit tables
+  nammamart_etl_checks.py             ETL data quality rules (pandas): passed / quarantined rows + dq_results
   data/nammamart/                     source CSV files (copied from assignment/nammamart_dataset, never edited)
   sql/                                ELT SQL files (Part B)
   quarantine/harshpratapsingh/        rejected rows with failure_reason (generated, not committed)
@@ -70,7 +71,7 @@ python3 -m venv .venv && source .venv/bin/activate
 pip install pandas duckdb pytest
 python profiling/profile_files.py > profiling/profile_output.txt
 python profiling/find_issues.py
-pytest tests/test_nammamart_common.py -v
+pytest tests/test_nammamart_common.py tests/test_nammamart_etl.py -v
 ```
 
 ## Data and privacy

@@ -19,7 +19,7 @@ Status of every item in section 6 of the assignment brief. ✅ done · 🟡 in p
 | 4 | SQL files in `include/sql/` | ✅ Raw, staging, data quality and mart SQL (16 files) | [include/sql/](include/sql/) |
 | 5 | `SUBMISSION.md`: Data Issues Log (Part 0) | ✅ | [Part 0](#part-0-discovery-and-data-profiling) |
 | 6 | `SUBMISSION.md`: answers to Part C | ✅ Answered, with schedule screenshot | [Part C](#part-c-scheduling) |
-| 7 | `SUBMISSION.md`: governance answers (Part E) | ⬜ | [Part E](#part-e-data-governance) |
+| 7 | `SUBMISSION.md`: governance answers (Part E) | ✅ | [Part E](#part-e-data-governance) |
 | 8 | `SUBMISSION.md`: observability results table (Part F) | ✅ | [Part F](#part-f-observability-tests) |
 | 9 | `SUBMISSION.md`: recommendation (Part G) | ⬜ | [Part G](#part-g-recommendation-to-the-cto) |
 | 10 | Screenshots: both DAGs green in Graph view, 9:00 AM IST schedule, one quarantine file, `dq_results`, `pipeline_runs`, payment reconciliation | ✅ 7 of 7 | [Screenshots](#screenshots) |
@@ -893,34 +893,239 @@ ORDER BY zone IS NULL, etl_net_revenue DESC;
 
 ## Part E: Data governance
 
-**Status:** ⬜ not started.
+**Status:** ✅ done. Every answer uses this pipeline as the example. The numbers come from the warehouse after the final clean run on 2026-10-20 (`partF_final_clean_run__etl/elt_124040`).
 
 ### E1. Ownership
-_To be completed._
+
+| Dataset | Business owner (decides what "correct" means) | Technical owner |
+|---|---|---|
+| `orders.csv` | Operations (Kavya, COO) | Ordering app team, who produce the export |
+| `payments.csv` | Finance (CFO) | Payment gateway integration |
+| `customers.csv` | Customer/CRM team, with the privacy officer for personal data | CRM system |
+| `products.csv` | Category and merchandising team (MRP, cost price) | Catalogue system |
+| `stores.csv` | Operations (store operations) | Operations |
+| Warehouse tables (`etl_*`, `raw_*`, `stg_*`, `mart_*`, `dq_results`, `pipeline_runs`) | Finance for revenue, margin and reconciliation; Operations for store KPIs and delivery SLA | The data engineering team (today, me) |
+
+- **Who approves a rule change.** The business owner of the data approves a change to a quality rule; data engineering makes it. For example, the 120-minute delivery limit is an Operations rule, so the COO approves it.
+- **How the change is made.** The limit is one constant, `MAX_DELIVERY_MINUTES` in [`nammamart_common.py`](include/nammamart_common.py). Both pipelines read it (ELT passes it to SQL as a variable), so a change is a single reviewed pull request with the tests re-run.
+- **Where it is recorded.** The pull request with the approver's name is the record. Severity changes are also logged in [0.7](#07-severity-changes-made-when-designing-the-pipelines).
 
 ### E2. Data dictionary
-_To be completed._
+
+Star schema built by the ETL DAG.
+- Allowed values come from [`nammamart_common.py`](include/nammamart_common.py).
+- **Source** is the file and column the value comes from.
+- PII means the value identifies, or can be linked back to, a person.
+
+**`etl_fact_orders`**: one row per order (latest valid version). Only rows that passed every Critical check.
+
+| Column | Type | Meaning | Source | Allowed values / rule | PII |
+|---|---|---|---|---|---|
+| `order_id` | VARCHAR | Order key (primary key) | orders `order_id` | Unique, not null | No |
+| `order_ts` | TIMESTAMP | When the order was placed (Bengaluru local time) | orders `order_ts` | `YYYY-MM-DD HH:MM:SS`, not in the future | No |
+| `order_date` | DATE | Date part of `order_ts`, used for daily reports | derived | | No |
+| `customer_id` | VARCHAR | Customer key → `etl_dim_customer` | orders `customer_id` | Exists in customers, not quarantined | **Yes** (pseudonymous key) |
+| `store_id` | VARCHAR | Store key → `etl_dim_store` | orders `store_id` | Exists in stores | No |
+| `product_id` | VARCHAR | Product key → `etl_dim_product` | orders `product_id` | Exists in products, not quarantined | No |
+| `quantity` | INTEGER | Units ordered | orders `quantity` | > 0 | No |
+| `unit_price` | DOUBLE | Price per unit (₹) | orders `unit_price` | > 0 | No |
+| `discount_pct` | DOUBLE | Discount (%) | orders `discount_pct` | 0–100 | No |
+| `order_amount` | DOUBLE | Amount charged (₹) | orders `order_amount` | ≥ 0 and = quantity × unit_price × (1 − discount_pct/100), within ₹0.01 | No |
+| `cost_price` | DOUBLE | Product cost per unit at load time (₹) | products `cost_price` | ≤ MRP | No |
+| `payment_mode` | VARCHAR | How the customer paid | orders `payment_mode` | UPI, Card, Cash on Delivery, Wallet | No |
+| `order_status` | VARCHAR | Latest status | orders `order_status` (upper-cased) | DELIVERED, CANCELLED, RETURNED | No |
+| `channel` | VARCHAR | Where the order was placed | orders `channel` | App, Web | No |
+| `delivery_minutes` | DOUBLE | Minutes from order to delivery | orders `delivery_minutes` | Required if DELIVERED; ≤ 120 | No |
+| `net_revenue` | DOUBLE | Revenue after discount (₹) | derived | `order_amount` if DELIVERED, else 0 | No |
+| `gross_margin` | DOUBLE | Margin (₹) | derived | `order_amount − quantity × cost_price` if DELIVERED, else 0 | No |
+| `within_15_min` | BOOLEAN | Delivered within the 15-minute promise | derived | `delivery_minutes ≤ 15`; NULL if not delivered | No |
+| `source_file` | VARCHAR | File the row came from (lineage) | pipeline | `orders.csv` or `orders_<date>_increment.csv` | No |
+| `source_row` | INTEGER | Line number in that file, header = line 1 (lineage) | pipeline | | No |
+| `row_hash` | VARCHAR | MD5 of the 13 business columns; used to detect a changed order | pipeline | | No |
+| `run_id` | VARCHAR | Airflow run that last inserted or updated the row | pipeline | | No |
+| `loaded_at` | TIMESTAMP | When that run wrote the row (UTC) | pipeline | | No |
+
+**`etl_fact_payments`**: one row per valid payment, rebuilt fully each run.
+
+| Column | Type | Meaning | Source | Allowed values / rule | PII |
+|---|---|---|---|---|---|
+| `payment_id` | VARCHAR | Payment key | payments `payment_id` | Unique | No |
+| `order_id` | VARCHAR | Order the payment is for | payments `order_id` | Warning if not in orders (goes to reconciliation) | No |
+| `payment_ts` | TIMESTAMP | When the gateway recorded it | payments `payment_ts` | Not in the future | No |
+| `payment_mode` | VARCHAR | Mode at the gateway | payments `payment_mode` (standardised, e.g. `COD` → `Cash on Delivery`) | UPI, Card, Cash on Delivery, Wallet | No |
+| `amount_paid` | DOUBLE | Amount (₹) | payments `amount_paid` | ≥ 0 | No |
+| `payment_status` | VARCHAR | Gateway outcome | payments `payment_status` | SUCCESS, FAILED, REFUNDED | No |
+| `gateway_ref` | VARCHAR | Gateway transaction reference (not a card number) | payments `gateway_ref` | | No |
+| `order_in_source` | BOOLEAN | The order exists in the order files | derived | | No |
+| `source_file`, `source_row` | VARCHAR, INTEGER | Lineage, as in the fact table | pipeline | | No |
+
+**`etl_dim_customer`**: one row per valid customer. Raw name, email and phone are **not** stored.
+
+| Column | Type | Meaning | Source | Allowed values / rule | PII |
+|---|---|---|---|---|---|
+| `customer_id` | VARCHAR | Customer key | customers `customer_id` | Unique | **Yes** (pseudonymous) |
+| `name_masked` | VARCHAR | Initials only, e.g. `D*** D***` | `mask_name(full_name)` | | **Yes** (masked) |
+| `email_masked` | VARCHAR | e.g. `pr***@example.com` | `mask_email(email)` | Warning if missing or bad format | **Yes** (masked) |
+| `phone_masked` | VARCHAR | e.g. `98******21` | `mask_phone(phone)` | Warning if not 10 digits | **Yes** (masked) |
+| `city`, `area` | VARCHAR | Where the customer lives | customers | Warning if city missing | **Yes** (location) |
+| `pincode` | VARCHAR | Postal code | customers | Warning if not 6 digits | **Yes** (location) |
+| `signup_date` | DATE | Account creation date | customers | Not in the future | Yes (linked to a person) |
+| `loyalty_tier` | VARCHAR | Loyalty level | customers (casing fixed) | Bronze, Silver, Gold, Platinum | Yes (linked to a person) |
+| `is_active` | BOOLEAN | Account active | customers | | Yes (linked to a person) |
+
+**`etl_dim_product`**: one row per valid product.
+
+| Column | Type | Meaning | Source | Allowed values / rule | PII |
+|---|---|---|---|---|---|
+| `product_id` | VARCHAR | Product key | products | Unique | No |
+| `product_name`, `brand` | VARCHAR | Name and brand | products | | No |
+| `category`, `sub_category` | VARCHAR | Catalogue grouping (used in Q2) | products | `category` not null | No |
+| `mrp` | DOUBLE | Maximum retail price (₹) | products | > 0 | No |
+| `cost_price` | DOUBLE | NammaMart's cost (₹) | products | ≤ `mrp` | No |
+| `unit` | VARCHAR | Pack unit (kg, pack, …) | products | | No |
+| `is_perishable` | BOOLEAN | Perishable item | products | | No |
+| `launch_date` | DATE | Date first sold | products | | No |
+
+**`etl_dim_store`**: one row per store.
+
+| Column | Type | Meaning | Source | Allowed values / rule | PII |
+|---|---|---|---|---|---|
+| `store_id` | VARCHAR | Store key | stores | Unique | No |
+| `store_name`, `area`, `pincode` | VARCHAR | Store name and location | stores | | No |
+| `zone` | VARCHAR | Reporting zone | stores | North, South, East, West; missing → `Unknown` (Warning) | No |
+| `open_date` | DATE | Store opening date | stores | | No |
+| `manager_name` | VARCHAR | Store manager | stores | | **Yes** (employee name) |
+| `capacity_orders_per_day` | INTEGER | Daily order capacity | stores | > 0 (Warning) | No |
+
+**ELT equivalents.**
+- `raw_*` tables hold every source column exactly as received (all VARCHAR), plus `_source_file`, `_source_row`, `_run_id` and `_loaded_at`.
+- `stg_*` tables have the same typed and masked business columns as above, plus `dq_status` (VALID / REJECTED), `failure_reason` and the same four lineage columns.
+- The six `mart_*` tables use only VALID rows.
 
 ### E3. Lineage
-_To be completed._
+
+**The number I traced:** `mart_daily_store_kpis` for **2026-09-01, store S01**: `delivered_orders = 3`, `net_revenue = ₹1,410.80`.
+
+| Step | ELT | ETL |
+|---|---|---|
+| 1. The number | `mart_daily_store_kpis` row (2026-09-01, S01) = ₹1,410.80 | Same row in `etl_daily_zone_revenue` = ₹1,410.80 |
+| 2. The orders behind it | `stg_orders WHERE order_date = '2026-09-01' AND store_id = 'S01' AND order_status = 'DELIVERED'` returns 4 rows. 3 are VALID: ORD000013 ₹28.80, ORD000025 ₹788.00, ORD000058 ₹594.00. 1 is REJECTED: ORD000066 ₹837.00, "product_id points to a quarantined products row". | `etl_fact_orders` with the same filter returns the same 3 orders. ORD000066 is not there; it is in `orders_failed_<run_id>.csv` with the same reason. |
+| 3. File and row | `_source_file = orders.csv`, `_source_row` = 1369, 728, 444 (and 1654 for the rejected one) | `source_file = orders.csv`, `source_row` = 1369, 728, 444 |
+| 4. As received | `raw_orders WHERE _run_id = '…elt_124040' AND _source_row IN (1369, 728, 444)` returns the original text of each row, kept in the warehouse | Line 1369 of `orders.csv` is `ORD000013,2026-09-01 08:28:14,C00217,S01,P0024,1,36.0,20,28.8,UPI,DELIVERED,App,9`. This is the file on disk, or the run folder copy, which is kept for 3 days. |
+
+- **Both pipelines can trace it.** Checking lines 1369, 728 and 444 of `orders.csv` gives exactly 28.8 + 788.0 + 594.0 = 1,410.80.
+- **ELT is easier.** The whole trace (mart → staging → raw) is SQL inside one database. Raw keeps every version of every row, so the trace still works after the source file is replaced or corrected. Staging also shows the rows that were *excluded* and why.
+- **ETL stops at the fact table.** After that you need the CSV that was used on that day. Once the file is overwritten and the 3-day run folder is deleted, the "as received" proof is gone. Only rejected rows survive, in the quarantine files.
 
 ### E4. Personal data
-_To be completed._
+
+**Personal data in the dataset:**
+
+| File | Columns | Kind |
+|---|---|---|
+| `customers.csv` | `full_name`, `email`, `phone` | Direct identifiers |
+| `customers.csv` | `city`, `area`, `pincode` | Location |
+| `customers.csv` | `customer_id`, `signup_date`, `loyalty_tier`, `is_active` | Personal because each row is about one person |
+| `orders.csv` | `customer_id` | Links a person's purchase history (what they buy, when, at which store) |
+| `payments.csv` | `order_id`, `gateway_ref` | Link a payment to that person through the order |
+| `stores.csv` | `manager_name` | An employee's name |
+
+**How I masked it.**
+- **Rules:** email `pr***@example.com` (first 2 characters kept), phone `98******21` (first 2 and last 2 digits kept), name `D*** D***` (initials only).
+- **ETL:** the masking runs in Python (`mask_email`, `mask_phone`, `mask_name` in [`nammamart_common.py`](include/nammamart_common.py)).
+- **ELT:** the same rules run as SQL macros in [`macros.sql`](include/sql/common/macros.sql). Tests check that both give the same output.
+- **Where masking applies:** the raw columns are dropped from `etl_dim_customer`, `stg_customers` and every mart, so Q5 (top customers) shows only masked values. Task logs contain counts only; a search of every log of the final run found no email address.
+
+**Why mask instead of delete.**
+- The reports still need to tell customers apart. A support agent can confirm "pr***@example.com, number ending 21" with the caller without seeing the full values. The completeness checks (email missing or invalid) still work.
+- Deleting the customer rows would break the joins to orders and payments, and with them revenue by loyalty tier.
+
+Masking is pseudonymisation, not anonymisation. The masked tables are still personal data, because `customer_id` can be joined back to raw.
+
+**Law.** The **Digital Personal Data Protection Act, 2023 (DPDP Act)** applies, with NammaMart as the *Data Fiduciary*. It expects:
+- personal data used only for the purpose the customer was told about (with consent or a legitimate use);
+- only the data that is needed (minimisation) and kept accurate;
+- data erased when the purpose is over (storage limitation);
+- reasonable security safeguards against a breach;
+- breaches reported to the Data Protection Board and to each affected person;
+- customers' rights respected: access, correction, erasure and grievance redressal.
+
+Penalties go up to ₹250 crore for failing to protect data. The DPDP Rules, 2025 add operational detail, for example the breach-reporting timelines.
 
 ### E5. Access control
-_To be completed._
+
+| Layer | Who reads it | Why |
+|---|---|---|
+| Raw (`raw_*`, and the source CSVs) | Only the pipeline's service account and the data engineers who run it | It holds unmasked personal data and is the evidence copy |
+| Staging (`stg_*`, `stg_rejected_rows`) | Data engineers and analytics engineers | Masked and typed, but includes rejected rows; for debugging and building marts |
+| Marts and star schema (`mart_*`, `etl_*`, `dq_results`, `pipeline_runs`) | Finance, Operations, store managers (ideally only their own store) and leadership, read-only | Masked, validated numbers for decisions |
+| Quarantine (`include/quarantine/`) | Data engineers and the data stewards who fix the source data | `customers_failed_<run_id>.csv` keeps rows as received, so it holds **raw** name, email and phone and needs the same protection as raw |
+
+- **Unmasked phone numbers in raw `customers`.** Nobody should read them from the warehouse in day-to-day work. Delivery and support staff who need to call a customer should use the source CRM/app, which has its own access control and logging.
+- **Exceptions.** The privacy officer may need raw data to answer an access or erasure request; a data engineer may need it to debug a phone-format rule. Either one should get time-limited access, logged.
+- **Today vs production.** DuckDB has no users or roles, so today access to the file is access to everything. In production I would put `raw`, `staging`, `marts` and `quarantine` in separate schemas of a server database (PostgreSQL) with `GRANT SELECT` per role. I would also use Airflow's built-in roles: Viewer for business users, Op/User for engineers.
 
 ### E6. Retention
-_To be completed._
+
+| Data | Keep for | Then | Implemented? |
+|---|---|---|---|
+| Run working folders (`include/tmp/<run_id>`, which hold copies of the extracts including raw PII) | 3 days, long enough to Clear and re-run a failed task | Deleted by `audit_run` (`cleanup_old_run_dirs`) | ✅ Yes |
+| Raw orders and payments (`raw_orders`, `raw_payments`) | 8 years, since these are financial records (books of account) | Archived to cold storage, then deleted | ⬜ Proposed |
+| Raw customers (`raw_customers`) | 90 days of snapshots | Delete older snapshots; masked staging keeps the current record | ⬜ Proposed |
+| Quarantine files | 90 days (30 days for `customers_failed_*`, which contains raw PII), enough time for the source team to fix the data | Deleted by a cleanup like the run-folder one; `dq_results` keeps the counts | ⬜ Proposed. 88 files have built up so far and none are deleted. |
+| Masked customer data (`etl_dim_customer`, `stg_customers`) | While the account is active, then up to 3 years after the last activity, or until the customer asks for erasure | Replace name, email, phone and location with NULL and keep `customer_id`, so orders and revenue history stay correct | ⬜ Proposed |
+| `dq_results`, `pipeline_runs` (no personal data) | 2 years, for quality trends | Delete older rows | ⬜ Proposed |
+
+Each deletion should be logged (what, how many rows, when) so we can prove to an auditor that the policy is followed.
 
 ### E7. Secrets
-_To be completed._
+
+- **What my setup needs today.** Neither DAG uses a credential: the inputs are local CSV files and the warehouse is a local DuckDB file. The only planned secret is `SLACK_WEBHOOK_URL`, for failure alerts (Part F).
+- **Where it goes.** An **Airflow Variable**, created in the UI (*Admin → Variables*) or as the environment variable `AIRFLOW_VAR_SLACK_WEBHOOK_URL` in `.env`. Both `.env` and `airflow_settings.yaml` are in `.gitignore`.
+- **How it is read.** At run time, inside the task, with `Variable.get("SLACK_WEBHOOK_URL")`. The reference code in [`ai_explainer.py`](include/ai_explainer.py) reads its API key the same way, with `Variable.get("AZURE_OPENAI_API_KEY")`.
+- **Why it must never be in the DAG file.** Every Airflow component parses the DAG file, and every UI user can read it in the *Code* tab.
+- **Why it must never be on GitHub.** Git keeps the value in history even after it is deleted. Public repositories are scanned by bots within minutes, so a leaked webhook lets anyone post fake alerts into the company channel. The only fix is to rotate it.
+- **Check.** A scan of the repository finds no webhook URLs, API keys or passwords.
+- **Production.** Use a secrets backend (for example HashiCorp Vault or AWS Secrets Manager). Add `webhook` to `[core] sensitive_var_conn_names` so Airflow hides the value in logs and the UI.
 
 ### E8. Audit
-_To be completed._
+
+**Finance's request:** "Show me a rejected order exactly as received, the rule it broke, and prove it isn't in revenue."
+
+**The order:** **ORD001610**, line 513 of `orders.csv`.
+
+| Question | ETL answer | ELT answer |
+|---|---|---|
+| Exactly as received | `orders_failed_<run_id>.csv` keeps the original text: `ORD001610,2026-13-05 11:00:00,C00359,S08,P0030,1,50.0,0,50.0,UPI,DELIVERED,App,12`, plus `source_file = orders.csv`, `source_row = 513` | `SELECT * FROM raw_orders WHERE order_id = 'ORD001610' AND _run_id = 'partF_final_clean_run__elt_124040'` returns the same values, all as text, with `_source_row = 513` and `_loaded_at` |
+| Rule it broke | `failure_reason` column of the quarantine file: "order_ts is not a valid YYYY-MM-DD HH:MM:SS timestamp" (month 13). `dq_results` for the run shows `orders.order_ts_valid` FAIL, 4 rows. | `stg_rejected_rows` (`source_row` 513) and `stg_orders.failure_reason` give the same reason. `stg_orders.dq_status = 'REJECTED'`. Same `dq_results` row. |
+| Not in revenue | `SELECT count(*) FROM etl_fact_orders WHERE order_id = 'ORD001610'` → **0**. CFO revenue is `sum(net_revenue)` of that table, so it cannot include the order. | The marts are built only from `dq_status = 'VALID'`. The order is REJECTED, so `mart_daily_store_kpis` (₹1,128,410.45 in total) cannot include it. |
+
+**Bonus finding for finance.** The customer *did* pay ₹50 for this order. Both reconciliation tables list it as `PAYMENT_FOR_QUARANTINED_ORDER` (₹50.00 at risk), so the money is accounted for even though the order is not in revenue.
 
 ### E9. Change history
-_To be completed._
+
+**The example.** The increment file corrects 10 September orders from DELIVERED to RETURNED and keeps their original September `order_ts`. The closest to the brief's example is **ORD000271**: ₹445.00, ordered on 4 September, delivered, and marked RETURNED in `orders_2026-10-01_increment.csv`. 9 of the 10 corrections are valid and count in revenue; ORD000822 is rejected in both files.
+
+**What each pipeline shows for September after the increment:**
+
+| | Before the increment | After the increment |
+|---|---|---|
+| September revenue, ETL | ₹1,059,881.95 | **₹1,056,219.25** |
+| September revenue, ELT | ₹1,059,881.95 | **₹1,056,219.25** |
+| Difference | | −₹3,662.70 (the 9 valid returned orders, including ORD000271's ₹445.00) |
+
+- **Both pipelines restate September.** Each keeps the latest status and dates it by `order_ts`.
+- **ETL loses the old version.** `MERGE` overwrote the row: ORD000271 is now RETURNED with `net_revenue` 0.
+- **ELT keeps both versions.** `raw_orders` still has both: `orders.csv` row 1231 (DELIVERED) and increment row 3 (RETURNED).
+- **Reconciliation.** These same 9 orders show up as `RETURNED_NOT_REFUNDED`, ₹3,662.70, because no refund has reached the gateway yet.
+
+**What finance wants.** Finance wants September **as reported and closed**: ₹1,059,881.95, with the return booked as a −₹445 adjustment in **October**, the month it happened. Closed months should not change. Operations, on the other hand, wants the **current status** for return-rate analysis.
+
+**How to keep both views:**
+1. **Store order events instead of overwriting.** Add an append-only history table, an SCD Type 2 table with `valid_from`, `valid_to` and `status`. Then "September as reported" is the version valid on 30 September, and "September as now known" is the current version.
+2. **ELT can build it today** from `raw_orders`, which already holds every version tagged with its file and `_loaded_at`.
+3. **ETL needs a change.** `load` would have to insert the old version into `etl_fact_orders_history` before each update.
+4. **A question for the client.** The increment has no `returned_at` column, so the return date can only be taken from the file date (1 October). I would ask the client to add `status_changed_at` to the export.
 
 ---
 

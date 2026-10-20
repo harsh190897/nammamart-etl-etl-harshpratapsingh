@@ -26,7 +26,7 @@ Both write to a local DuckDB warehouse and record every quality check (`dq_resul
 | B. ELT pipeline | ✅ Done (19 tasks: raw, staging, marts, run audit). Same checks, rejected rows and totals as ETL; September totals match |
 | C. Scheduling | ✅ Answered (ETL) |
 | D. Data quality dimensions | ✅ 110 checks across all 6 dimensions, in Python (ETL) and SQL (ELT), written to `dq_results` every run |
-| E. Data governance | ⬜ Not started |
+| E. Data governance | ✅ All 9 answers, with a data dictionary for the star schema, a lineage trace and an audit example |
 | F. Observability tests | ✅ Run audit (`pipeline_runs`) in both DAGs; 10 experiments (plus 8b and 9b) run on both DAGs; five-pillar mapping |
 | G. Recommendation | ⬜ Not started |
 
